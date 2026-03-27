@@ -1,86 +1,75 @@
 import { createClient } from '@/lib/supabase/server'
 import Anthropic from '@anthropic-ai/sdk'
 import type { ChildKey, GraphExtraction } from './types'
+import { fetchExistingConceptsForPrompt } from './wtr'
+import { getSharedRules, getSessionExtractionPrompt, formatExistingConceptsBlock, formatOpenGapsBlock } from './prompts'
 
 const anthropic = new Anthropic()
 
-const EXTRACTION_PROMPT = `
-You are analysing a tutoring session transcript for a 12-year-old IB MYP student.
-
-Extract the following and return ONLY valid JSON matching the schema below.
-No preamble, no explanation, no markdown fences.
-
-Extract:
-1. concepts[] — specific named concepts that were meaningfully discussed
-   (not every word, only ideas that were actually explored or explained)
-2. connections[] — links between concepts that emerged in this session
-   (especially cross-subject links — e.g. parabolas in maths = projectile motion in physics)
-3. gaps[] — concepts the student clearly did NOT understand by the end
-   (look for: confusion, repeated wrong answers, "I don't get why", trailing off)
-4. gaps_resolved[] — concept names matching previously unresolved gaps
-   that now appear understood (the student got it in this session)
-
-Schema:
-{
-  "concepts": [
-    { "name": string, "subject": string, "type": "topic_concept" | "ib_key_concept" | "cross_subject" }
-  ],
-  "connections": [
-    { 
-      "concept_a": string, "subject_a": string,
-      "concept_b": string, "subject_b": string,
-      "relationship": string
-    }
-  ],
-  "gaps": [
-    { "concept": string, "subject": string, "note": string }
-  ],
-  "gaps_resolved": [
-    { "concept": string }
-  ]
+function parseJsonFromClaudeText(raw: string): unknown {
+  let t = raw.trim()
+  if (t.startsWith('```')) {
+    t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/m, '')
+  }
+  return JSON.parse(t)
 }
-
-Rules:
-- concept names should be short (2-5 words): "Quadratic equations", "Projectile motion"
-- relationship should be a short phrase: "same mathematical shape", "real-world example of", "prerequisite for", "same IB key concept as"
-- gap note should be one sentence: what specifically they didn't understand
-- if nothing fits a category, return an empty array for it
-- return ONLY the JSON object, nothing else
-`
 
 export async function extractAndSaveGraph({
   childKey,
   episodeId,
   subject,
   topic,
+  grade,
   messages,
 }: {
   childKey: ChildKey
   episodeId: string
   subject: string
   topic: string
+  grade?: string
   messages: Array<{ role: 'user' | 'assistant'; content: string }>
 }): Promise<GraphExtraction | null> {
-  // Format transcript for Claude
+  const supabase = await createClient()
+
+  const [existingConcepts, { data: openGaps }] = await Promise.all([
+    fetchExistingConceptsForPrompt(supabase, { limit: 500 }),
+    supabase
+      .from('learning_gaps')
+      .select('concept, subject, note')
+      .eq('child_key', childKey)
+      .eq('status', 'open')
+      .limit(20),
+  ])
+
   const transcript = messages
     .map(m => `${m.role === 'user' ? 'Student' : 'Tutor'}: ${m.content}`)
     .join('\n\n')
 
-  // Call Claude to extract graph
   let extraction: GraphExtraction
   try {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
+      max_tokens: 1500,
       messages: [
         {
           role: 'user',
-          content: `${EXTRACTION_PROMPT}
+          content: `${getSessionExtractionPrompt()}
+
+${getSharedRules()}
+
+---
 
 Session context:
-Subject: ${subject}
-Topic: ${topic}
-Student: ${childKey}
+- Subject: ${subject}
+- Topic: ${topic}
+- Student: ${childKey}
+- Grade: ${grade ?? 'unknown'}
+
+Existing concepts in database (reuse exact name+subject when same meaning):
+${formatExistingConceptsBlock(existingConcepts)}
+
+Open gaps for this student (use exact concept name if resolved):
+${formatOpenGapsBlock(openGaps ?? [])}
 
 Transcript:
 ${transcript}`,
@@ -89,29 +78,34 @@ ${transcript}`,
     })
 
     const text = response.content[0].type === 'text' ? response.content[0].text : ''
-    extraction = JSON.parse(text.trim()) as GraphExtraction
+    extraction = parseJsonFromClaudeText(text) as GraphExtraction
+    if (!Array.isArray(extraction.concepts)) extraction.concepts = []
+    if (!Array.isArray(extraction.connections)) extraction.connections = []
+    if (!Array.isArray(extraction.gaps)) extraction.gaps = []
+    if (!Array.isArray(extraction.gaps_resolved)) extraction.gaps_resolved = []
   } catch (err) {
     console.error('[graph/extract] Claude extraction failed:', err)
     return null
   }
 
-  const supabase = await createClient()
+  const errors: string[] = []
 
-  // Save concepts (upsert — same concept may appear across sessions)
   if (extraction.concepts.length > 0) {
     const { error } = await supabase.from('concepts').upsert(
       extraction.concepts.map(c => ({
         name: c.name,
         subject: c.subject,
         type: c.type,
-        grade: '6th Grade',
+        grade: grade ?? null,
       })),
       { onConflict: 'name,subject', ignoreDuplicates: true }
     )
-    if (error) console.error('[graph/extract] concepts upsert error:', error)
+    if (error) {
+      console.error('[graph/extract] concepts upsert error:', error)
+      errors.push(`concepts: ${error.message}`)
+    }
   }
 
-  // Save connections
   if (extraction.connections.length > 0) {
     const { error } = await supabase.from('concept_connections').insert(
       extraction.connections.map(c => ({
@@ -124,10 +118,12 @@ ${transcript}`,
         episode_id: episodeId,
       }))
     )
-    if (error) console.error('[graph/extract] connections insert error:', error)
+    if (error) {
+      console.error('[graph/extract] connections insert error:', error)
+      errors.push(`connections: ${error.message}`)
+    }
   }
 
-  // Save new gaps
   if (extraction.gaps.length > 0) {
     const { error } = await supabase.from('learning_gaps').insert(
       extraction.gaps.map(g => ({
@@ -139,10 +135,12 @@ ${transcript}`,
         episode_id: episodeId,
       }))
     )
-    if (error) console.error('[graph/extract] gaps insert error:', error)
+    if (error) {
+      console.error('[graph/extract] gaps insert error:', error)
+      errors.push(`gaps: ${error.message}`)
+    }
   }
 
-  // Resolve gaps that were fixed in this session
   if (extraction.gaps_resolved.length > 0) {
     for (const resolved of extraction.gaps_resolved) {
       const { error } = await supabase
@@ -151,8 +149,15 @@ ${transcript}`,
         .eq('child_key', childKey)
         .eq('concept', resolved.concept)
         .eq('status', 'open')
-      if (error) console.error('[graph/extract] gap resolve error:', error)
+      if (error) {
+        console.error('[graph/extract] gap resolve error:', error)
+        errors.push(`gap_resolve(${resolved.concept}): ${error.message}`)
+      }
     }
+  }
+
+  if (errors.length > 0) {
+    console.error('[graph/extract] completed with errors:', errors)
   }
 
   return extraction

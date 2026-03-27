@@ -3,6 +3,7 @@ import { createServiceClient } from '@/lib/supabase/service'
 import type { Concept, ConceptConnection } from '@/lib/graph/types'
 
 export const runtime = 'nodejs'
+const PAGE_SIZE = 1000
 
 type GraphSource = 'all' | 'curriculum' | 'student'
 
@@ -58,6 +59,47 @@ function conceptKey(name: string, subject: string | null) {
   return `${name}::${subject ?? ''}`
 }
 
+async function fetchAllConcepts(supabase: ReturnType<typeof createServiceClient>) {
+  const rows: Concept[] = []
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const to = from + PAGE_SIZE - 1
+    const { data, error } = await supabase
+      .from('concepts')
+      .select('*')
+      .order('subject')
+      .order('name')
+      .order('id')
+      .range(from, to)
+
+    if (error) throw new Error(error.message)
+    rows.push(...((data ?? []) as Concept[]))
+    if (!data || data.length < PAGE_SIZE) break
+  }
+
+  return rows
+}
+
+async function fetchAllConnections(supabase: ReturnType<typeof createServiceClient>) {
+  const rows: ConceptConnection[] = []
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const to = from + PAGE_SIZE - 1
+    const { data, error } = await supabase
+      .from('concept_connections')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, to)
+
+    if (error) throw new Error(error.message)
+    rows.push(...((data ?? []) as ConceptConnection[]))
+    if (!data || data.length < PAGE_SIZE) break
+  }
+
+  return rows
+}
+
 export async function GET(request: Request) {
   try {
     if (!checkAdmin(request)) {
@@ -70,38 +112,77 @@ export async function GET(request: Request) {
     const search = url.searchParams.get('search')?.trim().toLowerCase() ?? ''
     const source = (url.searchParams.get('source')?.trim() ?? 'all') as GraphSource
 
+    const weekStart = url.searchParams.get('week_start')?.trim() ?? ''
+    const weekEnd = url.searchParams.get('week_end')?.trim() ?? ''
+
     const supabase = createServiceClient()
 
-    const [{ data: conceptRows, error: conceptError }, { data: connectionRows, error: connectionError }] =
-      await Promise.all([
-        supabase.from('concepts').select('*').order('subject').order('name').limit(600),
-        supabase
-          .from('concept_connections')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(900),
-      ])
+    const [allConcepts, allConnections, { data: allSchedule }, { data: weekOptions }] = await Promise.all([
+      fetchAllConcepts(supabase),
+      fetchAllConnections(supabase),
+      supabase
+        .from('curriculum_schedule')
+        .select('concept_name, subject, week_start, week_end, schedule_type')
+        .order('week_start'),
+      supabase
+        .from('curriculum_schedule')
+        .select('week_start, week_end')
+        .order('week_start'),
+    ])
 
-    if (conceptError) {
-      return NextResponse.json({ error: conceptError.message }, { status: 500 })
+    const schedule = allSchedule ?? []
+
+    // Build a set of concept keys that fall within the selected week range
+    const weekFilteredKeys = new Set<string>()
+    let weekFiltering = false
+    if (weekStart || weekEnd) {
+      weekFiltering = true
+      for (const s of schedule) {
+        const inRange =
+          (!weekStart || s.week_start >= weekStart) &&
+          (!weekEnd || s.week_end <= weekEnd)
+        if (inRange) {
+          weekFilteredKeys.add(conceptKey(s.concept_name, s.subject))
+        }
+      }
     }
-    if (connectionError) {
-      return NextResponse.json({ error: connectionError.message }, { status: 500 })
+
+    // Build schedule lookup: concept key → earliest week_start
+    const scheduleByKey = new Map<string, { week_start: string; week_end: string; schedule_type: string }>()
+    for (const s of schedule) {
+      const key = conceptKey(s.concept_name, s.subject)
+      if (!scheduleByKey.has(key)) {
+        scheduleByKey.set(key, s)
+      }
     }
 
-    const allConcepts = (conceptRows ?? []) as Concept[]
-    const allConnections = (connectionRows ?? []) as ConceptConnection[]
+    // Deduplicate week options
+    const seenWeeks = new Set<string>()
+    const weeks = (weekOptions ?? [])
+      .filter(w => {
+        const k = `${w.week_start}|${w.week_end}`
+        if (seenWeeks.has(k)) return false
+        seenWeeks.add(k)
+        return true
+      })
 
-    const filteredConnections = allConnections.filter(connection =>
-      connectionVisible(connection, { subject, search, source })
-    )
+    const filteredConnections = allConnections
+      .filter(connection => connectionVisible(connection, { subject, search, source }))
+      .filter(connection => {
+        if (!weekFiltering) return true
+        const aKey = conceptKey(connection.concept_a, connection.subject_a)
+        const bKey = conceptKey(connection.concept_b, connection.subject_b)
+        return weekFilteredKeys.has(aKey) && weekFilteredKeys.has(bKey)
+      })
 
     const conceptIndex = new Map(allConcepts.map(concept => [conceptKey(concept.name, concept.subject), concept]))
     const visibleConceptMap = new Map<string, Concept>()
 
     for (const concept of allConcepts) {
       if (conceptVisible(concept, { subject, grade, search })) {
-        visibleConceptMap.set(conceptKey(concept.name, concept.subject), concept)
+        const key = conceptKey(concept.name, concept.subject)
+        if (weekFiltering && !weekFilteredKeys.has(key)) continue
+        visibleConceptMap.set(key, concept)
       }
     }
 
@@ -110,16 +191,16 @@ export async function GET(request: Request) {
       const bKey = conceptKey(connection.concept_b, connection.subject_b)
 
       const a = conceptIndex.get(aKey)
-      if (a && (!grade || a.grade === grade || a.grade === null)) {
+      if (a && (!grade || a.grade === grade || a.grade === null) && (!weekFiltering || weekFilteredKeys.has(aKey))) {
         visibleConceptMap.set(aKey, a)
       }
 
       const b = conceptIndex.get(bKey)
-      if (b && (!grade || b.grade === grade || b.grade === null)) {
+      if (b && (!grade || b.grade === grade || b.grade === null) && (!weekFiltering || weekFilteredKeys.has(bKey))) {
         visibleConceptMap.set(bKey, b)
       }
 
-      if (!a && (!subject || connection.subject_a === subject)) {
+      if (!a && (!subject || connection.subject_a === subject) && (!weekFiltering || weekFilteredKeys.has(aKey))) {
         visibleConceptMap.set(aKey, {
           id: `synthetic:${aKey}`,
           name: connection.concept_a,
@@ -130,7 +211,7 @@ export async function GET(request: Request) {
         })
       }
 
-      if (!b && (!subject || connection.subject_b === subject)) {
+      if (!b && (!subject || connection.subject_b === subject) && (!weekFiltering || weekFilteredKeys.has(bKey))) {
         visibleConceptMap.set(bKey, {
           id: `synthetic:${bKey}`,
           name: connection.concept_b,
@@ -142,8 +223,7 @@ export async function GET(request: Request) {
       }
     }
 
-    const visibleConceptKeys = new Set(visibleConceptMap.keys())
-    const concepts = Array.from(visibleConceptMap.values()).slice(0, 220)
+    const concepts = Array.from(visibleConceptMap.values())
     const allowedConceptKeys = new Set(concepts.map(concept => conceptKey(concept.name, concept.subject)))
 
     const connections = filteredConnections
@@ -152,7 +232,6 @@ export async function GET(request: Request) {
         const bKey = conceptKey(connection.concept_b, connection.subject_b)
         return allowedConceptKeys.has(aKey) && allowedConceptKeys.has(bKey)
       })
-      .slice(0, 320)
 
     const subjects = Array.from(
       new Set(
@@ -170,11 +249,24 @@ export async function GET(request: Request) {
       )
     ).sort((a, b) => a.localeCompare(b))
 
+    // Attach schedule info to each concept
+    const conceptsWithSchedule = concepts.map(concept => {
+      const key = conceptKey(concept.name, concept.subject)
+      const sched = scheduleByKey.get(key)
+      return {
+        ...concept,
+        week_start: sched?.week_start ?? null,
+        week_end: sched?.week_end ?? null,
+        schedule_type: sched?.schedule_type ?? null,
+      }
+    })
+
     return NextResponse.json({
-      concepts,
+      concepts: conceptsWithSchedule,
       connections,
-      filters: { subject, grade, search, source },
-      options: { subjects, grades },
+      schedule,
+      filters: { subject, grade, search, source, weekStart, weekEnd },
+      options: { subjects, grades, weeks },
       stats: {
         totalConcepts: concepts.length,
         totalConnections: connections.length,
@@ -183,8 +275,8 @@ export async function GET(request: Request) {
         visibleSubjects: Array.from(
           new Set(concepts.map(concept => concept.subject).filter((value): value is string => Boolean(value)))
         ).length,
-        trimmedConcepts: visibleConceptKeys.size > concepts.length,
-        trimmedConnections: filteredConnections.length > connections.length,
+        trimmedConcepts: false,
+        trimmedConnections: false,
       },
     })
   } catch (err) {

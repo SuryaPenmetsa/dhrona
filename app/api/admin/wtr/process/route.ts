@@ -134,32 +134,34 @@ async function postWtrProcess(request: Request) {
       existingConcepts: existing,
     })
 
-    const { conceptRows, connectionRows } = await saveWtrGraphToDatabase({
+    const { conceptRows, connectionRows, errors: saveErrors } = await saveWtrGraphToDatabase({
       supabase,
       extraction,
       wtrUploadId: uploadId,
       grade,
     })
 
+    const hasPartialFailure = saveErrors.length > 0
     const summary = {
       concepts: extraction.concepts.length,
       connections: extraction.connections.length,
       conceptRowsUpserted: conceptRows,
       connectionRowsInserted: connectionRows,
+      ...(hasPartialFailure ? { saveErrors } : {}),
     }
 
     await supabase
       .from('wtr_uploads')
       .update({
-        status: 'completed',
-        completed_at: new Date().toISOString(),
+        status: hasPartialFailure ? 'failed' : 'completed',
+        completed_at: hasPartialFailure ? null : new Date().toISOString(),
         extraction_summary: summary,
-        error_message: null,
+        error_message: hasPartialFailure ? saveErrors.join('; ') : null,
       })
       .eq('id', uploadId)
 
     return NextResponse.json({
-      ok: true,
+      ok: !hasPartialFailure,
       uploadId,
       extraction,
       summary,

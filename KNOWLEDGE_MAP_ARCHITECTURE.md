@@ -2,10 +2,10 @@
 
 ## 1. Purpose
 
-The knowledge map is the shared learning-memory layer for Drona. Its job is to turn two different kinds of educational evidence into one navigable structure:
+The knowledge map is the shared learning-memory layer for Drona. Its job is to turn two kinds of educational evidence into one navigable structure:
 
-1. Student learning signals from tutoring sessions.
-2. School syllabus signals from WTR / curriculum documents.
+1. **Student learning signals** from tutoring sessions.
+2. **School syllabus signals** from WTR / curriculum documents.
 
 Instead of treating each tutoring conversation as isolated, the system stores:
 
@@ -15,932 +15,454 @@ Instead of treating each tutoring conversation as isolated, the system stores:
 - what the school is planning to teach next,
 - and where cross-subject bridges already exist.
 
-This enables Drona to do four important things:
+This enables four capabilities:
 
 1. Remember concept relationships across sessions.
 2. Personalize future tutoring using prior gaps and prior concept bridges.
 3. Align tutoring with school curriculum progression.
 4. Give an admin-visible map of the current concept network.
 
-At a product level, the knowledge map is not just a visualization. It is a durable semantic memory system that supports tutoring quality, curriculum alignment, and future reasoning over student progress.
+The knowledge map is not just a visualization. It is a durable semantic memory system that supports tutoring quality, curriculum alignment, and future reasoning over student progress.
+
+---
 
 ## 2. Design Philosophy
 
-The system is intentionally designed as a lightweight semantic graph rather than a mathematically strict ontology or a full graph database. Several principles are visible in the implementation:
+The system is a lightweight semantic graph rather than a strict ontology or full graph database.
 
 ### 2.1 Human-meaningful nodes
 
-Nodes are named educational ideas such as `Quadratic equations`, `Projectile motion`, or `Change`.
-
-The system prefers canonical, human-readable labels over deeply normalized IDs in runtime APIs. This makes the graph easier to inspect, easier to prompt into an LLM, and easier to manually curate.
+Nodes are named educational ideas: `Quadratic equations`, `Projectile motion`, `Change`. The system prefers canonical, human-readable labels over normalized IDs. This makes the graph inspectable, promptable, and manually curable.
 
 ### 2.2 Directed learning relationships
 
-Edges are directional. An edge expresses that one concept leads to, supports, extends, applies to, or connects into another concept.
-
-Examples:
-
-- `Linear equations` -> `Quadratic equations`
-- `Data handling` -> `Experimental analysis`
-- `Quadratic equations` -> `Projectile motion`
-
-Direction matters because the map is used for:
-
-- prerequisite reasoning,
-- "what comes next" tutoring guidance,
-- focused map views that distinguish backward vs forward links,
-- curriculum sequencing from current week to coming week.
+Edges are directional. An edge expresses that one concept leads to, supports, extends, applies to, or connects into another. Direction matters for prerequisite reasoning, "what comes next" guidance, and visual layout.
 
 ### 2.3 One shared concept layer, multiple evidence layers
 
-The graph merges multiple evidence sources into one concept space:
-
-- a student/session layer,
-- a curriculum/WTR layer.
-
-This is why `concepts` are global, while `concept_connections` carry a source discriminator via `child_key`.
-
-The key design idea is:
-
-- concepts represent shared educational ideas,
-- connections represent context-specific evidence that those ideas are linked.
+Concepts are global. Connections carry a source discriminator (`child_key`) that separates student evidence from curriculum evidence. The design intent: concepts represent shared educational ideas; connections represent context-specific evidence that those ideas are linked.
 
 ### 2.4 LLM-assisted extraction, relational persistence
 
-Claude is used to read transcripts and WTR files and extract structured graph data. Supabase/Postgres then stores the durable result.
-
-This splits responsibilities cleanly:
-
-- LLM: semantic interpretation and extraction,
-- database: persistence, filtering, retrieval, and access control,
-- UI: exploration and visualization.
+Claude performs semantic interpretation and extraction. Supabase/Postgres handles persistence, filtering, retrieval, and access control. The UI handles exploration and visualization.
 
 ### 2.5 Practical over perfect normalization
 
-The current model favors implementation speed and inspectability over strict graph-theoretic purity:
+The model favors speed and inspectability over graph-theoretic purity. Edges store concept names + subjects instead of foreign keys. Missing concept rows can be synthesized for display. Connection deduplication is not enforced.
 
-- edges store concept names + subjects instead of concept foreign keys,
-- missing concept rows can be synthesized in the admin API for display,
-- connection deduplication is not yet enforced at the database layer.
+This keeps the system flexible but introduces real trade-offs covered in depth in section 12.
 
-This keeps the system flexible but introduces design trade-offs discussed later in this document.
+---
 
 ## 3. Conceptual Model
-
-The knowledge map has four primary conceptual entities.
 
 ### 3.1 Concept
 
 A concept is a named unit of understanding. It is the node in the graph.
 
-Implemented in `concepts`.
+**Table:** `concepts`
 
-Key fields:
+| Field | Purpose |
+|-------|---------|
+| `name` | Canonical concept label |
+| `subject` | Domain: `Mathematics`, `Science`, `History`, etc. |
+| `type` | One of `topic_concept`, `ib_key_concept`, `cross_subject` |
+| `grade` | Optional curriculum grouping |
 
-- `name`: canonical concept label.
-- `subject`: domain ownership such as `Mathematics`, `Science`, `History`.
-- `type`: semantic class of concept.
-- `grade`: optional curriculum grouping.
+Three concept types:
 
-Three concept types are supported:
+- **`topic_concept`** — standard syllabus or session-level ideas.
+- **`ib_key_concept`** — one of the 16 seeded IB MYP key concepts (`Change`, `Systems`, `Relationships`, etc.).
+- **`cross_subject`** — concepts that intentionally bridge subject boundaries.
 
-1. `topic_concept`
-   Standard syllabus or session-level ideas.
-2. `ib_key_concept`
-   One of the seeded IB MYP key concepts such as `Change`, `Systems`, `Relationships`.
-3. `cross_subject`
-   Concepts that intentionally bridge subject boundaries.
-
-This gives the graph a mixed ontology:
-
-- ordinary topical knowledge,
-- institutional IB framing concepts,
-- explicit interdisciplinary bridges.
+**Identity rule:** A concept is identified by `(name, subject)`. Same name in different subjects = distinct concepts. Same name + same subject = same canonical node.
 
 ### 3.2 Connection
 
 A connection is a directed relationship between two concepts.
 
-Implemented in `concept_connections`.
+**Table:** `concept_connections`
 
-Each edge stores:
+| Field | Purpose |
+|-------|---------|
+| `concept_a`, `subject_a` | Source endpoint (name + subject) |
+| `concept_b`, `subject_b` | Target endpoint (name + subject) |
+| `relationship` | Free-text semantic label |
+| `child_key` | Provenance: `girl`, `boy`, or `curriculum` |
+| `episode_id` | Session this came from (student edges) |
+| `wtr_upload_id` | WTR upload this came from (curriculum edges) |
 
-- source concept name and subject,
-- target concept name and subject,
-- relationship text,
-- source provenance (`child_key`),
-- optional `episode_id`,
-- optional `wtr_upload_id`.
+Connections are evidence-bearing assertions, not canonical axioms. The same conceptual relationship can appear multiple times with different provenance or phrasing.
 
-The system treats connections as evidence-bearing assertions rather than immutable truths. That matters because the same concepts can have:
+**Direction rule:** `concept_a` is always the source, `concept_b` the target. The system uses this for prerequisite reasoning, curriculum sequencing, and layout.
 
-- student-discovered bridges,
-- curriculum-defined sequencing,
-- multiple differently phrased relationships.
-
-Examples of relationship text:
-
-- `prerequisite for`
-- `same mathematical shape`
-- `real-world example of`
-- `builds on`
-- `next in school syllabus`
+**Provenance rule:** `child_key` encodes both audience scoping and source semantics. Real child values mean student evidence; `curriculum` means syllabus evidence.
 
 ### 3.3 Learning Gap
 
-A learning gap is not a graph edge. It is a stateful record of incomplete understanding for a specific student.
+A learning gap is a stateful record of incomplete understanding for a specific student. It is not a graph edge.
 
-Implemented in `learning_gaps`.
+**Table:** `learning_gaps`
 
-It stores:
+| Field | Purpose |
+|-------|---------|
+| `child_key` | Which student |
+| `concept` | Concept name string |
+| `subject` | Subject domain |
+| `note` | What specifically was not understood |
+| `status` | `open` or `resolved` |
+| `resolved_at` | When mastery was achieved |
 
-- which student,
-- which concept,
-- which subject,
-- what exactly was not understood,
-- whether the gap is still open or resolved.
+This creates a second memory structure alongside the graph:
 
-This creates a second memory structure layered alongside the graph:
+- **Graph memory** = conceptual structure.
+- **Gap memory** = mastery state.
 
-- graph memory = conceptual structure,
-- gap memory = mastery state.
-
-That combination is what lets the tutoring system both know the map and know where the learner is struggling inside the map.
+**Lifecycle:** `open` -> `resolved` (when a later session indicates understanding).
 
 ### 3.4 WTR Upload
 
-A WTR upload is an administrative ingestion event for syllabus documents.
+An administrative ingestion event for syllabus documents.
 
-Implemented in `wtr_uploads`.
+**Table:** `wtr_uploads`
 
-It stores:
+| Field | Purpose |
+|-------|---------|
+| `filename`, `mime_type`, `file_size_bytes` | File metadata |
+| `period_type`, `grade`, `label`, `school_year` | Curriculum labeling |
+| `status` | `pending` -> `processing` -> `completed` or `failed` |
+| `extraction_summary` | JSON summary of what was extracted |
+| `error_message` | Failure details |
 
-- file metadata,
-- grade / period labeling,
-- processing state,
-- error state,
-- extraction summary.
+This is the ingestion ledger that connects a curriculum extraction event to the edges it produced.
 
-This is not part of the graph itself, but it is the ingestion ledger that connects a curriculum extraction event to the curriculum edges it produced.
+---
 
 ## 4. Layered Graph Architecture
 
-The graph is best understood as three stacked layers that share one concept namespace.
+The graph is three stacked layers sharing one concept namespace.
 
 ### 4.1 Canonical concept layer
 
-This is the persistent set of known concepts in `concepts`.
-
-It acts as the vocabulary layer for the entire system. Both tutoring sessions and WTR imports try to reuse existing concepts so the graph converges instead of fragmenting.
+The persistent set of known concepts in `concepts`. Acts as the vocabulary layer. Both tutoring sessions and WTR imports try to reuse existing concepts so the graph converges instead of fragmenting.
 
 ### 4.2 Student evidence layer
 
-This is made of `concept_connections` rows where `child_key` is a real child identifier:
-
-- `girl`
-- `boy`
-
-These edges represent relationships that emerged from tutoring sessions. They are linked to `episode_id`, so they preserve where they came from.
-
-This layer is personalized. It reflects how a specific child has encountered ideas and what connections were made during tutoring.
+`concept_connections` rows where `child_key` is a real child identifier (`girl`, `boy`). These edges represent relationships that emerged from tutoring sessions, linked to `episode_id`. This layer is personalized.
 
 ### 4.3 Curriculum evidence layer
 
-This is made of `concept_connections` rows where `child_key = 'curriculum'`.
-
-These edges represent syllabus structure extracted from WTR uploads. They are linked to `wtr_upload_id`.
-
-This layer is non-personal. It captures the school's intended sequencing and subject organization.
+`concept_connections` rows where `child_key = 'curriculum'`. These edges represent syllabus structure extracted from WTR uploads, linked to `wtr_upload_id`. This layer is non-personal.
 
 ### 4.4 Why both layers matter
 
-This layered design lets Drona answer a more useful tutoring question:
+This lets Drona answer a useful tutoring question: "What should be taught now for this student, given both what the school is covering and what the child currently understands or misunderstands?"
 
-"What should be taught now for this student, given both what the school is covering and what the child currently understands or misunderstands?"
+Without the curriculum layer, tutoring memory drifts from school sequencing. Without the student layer, tutoring stays generic.
 
-Without the curriculum layer, tutoring memory would drift away from school sequencing.
-Without the student layer, tutoring would stay generic and fail to personalize.
-
-The current architecture combines both inside a single retrieval path and a single explorer UI.
+---
 
 ## 5. Database Design
 
-## 5.1 `concepts`
+### 5.1 Indexing strategy
 
-`concepts` is the node table.
+| Index | Supports |
+|-------|----------|
+| `concept_connections(child_key)` | Fetch child- or curriculum-scoped edges |
+| `concept_connections(concept_a)` | Look up edges by source endpoint |
+| `concept_connections(concept_b)` | Look up edges by target endpoint |
+| `concept_connections(wtr_upload_id)` | Find edges from a specific WTR upload |
+| `learning_gaps(child_key, status)` | Fetch unresolved gaps efficiently |
+| `wtr_uploads(created_at desc)` | Browse recent uploads |
 
-Important properties:
+### 5.2 Access control
 
-- UUID primary key.
-- `unique(name, subject)` prevents duplicate concept labels within the same subject.
-- `type` is constrained to the supported concept classes.
+RLS is enabled on all four tables.
 
-Important interpretation:
+**Read policies:**
+- Authenticated users can read `concepts`.
+- Children can read their own `concept_connections` and `learning_gaps`.
+- Parents can read all student rows.
+- Authenticated users can read curriculum connections.
+- No anonymous access.
 
-- same `name` in different subjects is allowed,
-- same `name` in same subject is merged,
-- subjectless concepts are allowed, especially seeded IB concepts.
+**Write policies:**
+- Authenticated users can insert connections and gaps.
+- Authenticated users can update gap status.
+- `wtr_uploads` is service-role/admin only.
 
-This table is globally shared, not child-scoped.
+**Admin secret:** The admin routes optionally enforce `WTR_ADMIN_SECRET` via `x-admin-secret` header.
 
-### 5.2 `concept_connections`
+---
 
-`concept_connections` is the edge table.
+## 6. End-to-End Data Flows
 
-Important properties:
+### 6.1 Flow A: tutoring session -> student knowledge map
 
-- UUID primary key.
-- Directed edge via `concept_a` -> `concept_b`.
-- Provenance encoded in `child_key`.
-- Optional source event references:
-  - `episode_id` for tutoring sessions,
-  - `wtr_upload_id` for curriculum uploads.
+**Implementation:** `lib/graph/extract.ts`
 
-Important design choice:
+| Step | What happens |
+|------|-------------|
+| 1 | Session transcript is assembled as `Student: ... / Tutor: ...` alternating text |
+| 2 | Claude is prompted to extract `concepts`, `connections`, `gaps`, `gaps_resolved` as JSON |
+| 3 | Concepts are upserted into `concepts` using `onConflict: 'name,subject'` with `ignoreDuplicates: true` |
+| 4 | Connections are inserted with `child_key = childKey` and `episode_id` |
+| 5 | New gaps are inserted with `status = 'open'` |
+| 6 | Resolved gaps are matched by concept name string and updated to `status = 'resolved'` |
 
-The edge does not reference `concepts.id`. Instead, it stores concept names and subjects directly.
+### 6.2 Flow B: WTR upload -> curriculum knowledge map
 
-Benefits:
+**Implementation:** `app/api/admin/wtr/process/route.ts`, `lib/graph/wtr.ts`
 
-- simpler extraction writes,
-- easier prompt formatting,
-- easier manual inspection,
-- concept rows can be absent and the edge still survives.
+| Step | What happens |
+|------|-------------|
+| 1 | Admin uploads syllabus file (PNG, JPEG, WebP, GIF, or PDF; max 12 MB) |
+| 2 | `wtr_uploads` row is created with `status = 'processing'` |
+| 3 | Existing concepts are fetched from Supabase and passed into the extraction prompt |
+| 4 | Claude extracts `concepts` and `connections` (no gaps from curriculum docs) |
+| 5 | Concepts are upserted using `onConflict: 'name,subject'` (without `ignoreDuplicates`) |
+| 6 | Connections are inserted with `child_key = 'curriculum'` and `wtr_upload_id` |
+| 7 | Upload row is updated to `completed` or `failed` |
 
-Costs:
+### 6.3 Flow C: graph retrieval -> tutoring context
 
-- no strict referential integrity between edge endpoints and nodes,
-- renaming concepts becomes harder,
-- canonicalization quality depends on prompt behavior,
-- display code must sometimes create synthetic nodes.
-
-### 5.3 `learning_gaps`
-
-`learning_gaps` is the mastery-state table.
-
-Important properties:
-
-- child-scoped records,
-- `status` lifecycle of `open` or `resolved`,
-- optional `resolved_at`,
-- optional `episode_id`.
-
-This design keeps conceptual misunderstanding records independent from the graph topology. That is appropriate because a gap is not "an edge"; it is a student-state annotation.
-
-### 5.4 `wtr_uploads`
-
-`wtr_uploads` is the ingestion log for curriculum files.
-
-Important properties:
-
-- lifecycle states: `pending`, `processing`, `completed`, `failed`,
-- upload metadata,
-- summary JSON for reporting,
-- timestamps for operational visibility.
-
-This table is necessary because curriculum extraction is an asynchronous-ish admin operation with failure modes, not just a silent insert.
-
-### 5.5 Indexing strategy
-
-The current schema includes indexes for:
-
-- `concept_connections(child_key)`
-- `concept_connections(concept_a)`
-- `concept_connections(concept_b)`
-- `concept_connections(wtr_upload_id)`
-- `learning_gaps(child_key, status)`
-- `wtr_uploads(created_at desc)`
-
-These indexes support the current dominant access patterns:
-
-- fetch child/curriculum scoped edges,
-- look up edges by endpoint names,
-- browse recent uploads,
-- fetch unresolved gaps efficiently.
-
-## 6. Access Control and Security Model
-
-The knowledge map uses a mixed access model.
-
-### 6.1 RLS on graph tables
-
-RLS is enabled on:
-
-- `concepts`
-- `concept_connections`
-- `learning_gaps`
-- `wtr_uploads`
-
-### 6.2 Read model
-
-Current policies allow:
-
-- authenticated users to read `concepts`,
-- children to read their own `concept_connections` and `learning_gaps`,
-- parents to read all student rows,
-- authenticated users to read curriculum connections,
-- no anonymous access by default.
-
-### 6.3 Write model
-
-Writes are comparatively permissive at the row-policy level for authenticated users, but the important runtime distinction is:
-
-- student/session graph writes happen through app code,
-- WTR admin writes happen through service-role-backed server routes,
-- `wtr_uploads` is intentionally service-role/admin-oriented.
-
-### 6.4 Admin secret
-
-The admin routes for WTR and graph exploration optionally enforce `WTR_ADMIN_SECRET`.
-
-If unset, the routes are open to the app runtime.
-If set, requests must include `x-admin-secret`.
-
-This is a lightweight operational gate around the administrative interfaces.
-
-## 7. End-to-End Data Flows
-
-There are three major system flows.
-
-### 7.1 Flow A: tutoring session -> student knowledge map
-
-This flow is implemented in `lib/graph/extract.ts`.
-
-#### Step 1: session transcript is assembled
-
-The system formats the conversation as a simple alternating transcript:
-
-- `Student: ...`
-- `Tutor: ...`
-
-Context passed to extraction:
-
-- `childKey`
-- `episodeId`
-- `subject`
-- `topic`
-- transcript messages
-
-#### Step 2: Claude extracts structured learning data
-
-Claude is prompted to produce JSON with:
-
-- `concepts`
-- `connections`
-- `gaps`
-- `gaps_resolved`
-
-The extraction prompt is intentionally oriented around tutoring signals:
-
-- meaningful concepts discussed,
-- cross-subject or explanatory bridges,
-- concepts still not understood,
-- previously open gaps that now appear resolved.
-
-#### Step 3: concepts are upserted
-
-Extracted concepts are upserted into `concepts` using `onConflict: 'name,subject'`.
-
-This is the graph's main convergence mechanism. It tries to ensure repeated encounters with the same idea reuse the same node.
-
-#### Step 4: student edges are inserted
-
-Connections are inserted into `concept_connections` with:
-
-- `child_key = childKey`
-- `episode_id = episodeId`
-
-This is how the student-specific evidence layer is built.
-
-#### Step 5: learning gaps are inserted
-
-New unresolved misunderstandings are stored in `learning_gaps` with `status = 'open'`.
-
-#### Step 6: resolved gaps are updated
-
-If Claude reports that previously unresolved ideas now appear understood, the system updates matching open gaps to:
-
-- `status = 'resolved'`
-- `resolved_at = now()`
-
-This creates a mastery-history trail across sessions.
-
-### 7.2 Flow B: WTR upload -> curriculum knowledge map
-
-This flow is implemented across:
-
-- `app/api/admin/wtr/process/route.ts`
-- `lib/graph/wtr.ts`
-- `app/api/admin/wtr/route.ts`
-
-#### Step 1: admin uploads syllabus file
-
-Accepted file types:
-
-- PNG
-- JPEG
-- WebP
-- GIF
-- PDF
-
-The route validates:
-
-- admin secret if configured,
-- presence of `ANTHROPIC_API_KEY`,
-- file size limit,
-- mime type.
-
-#### Step 2: upload row is created
-
-A `wtr_uploads` row is inserted with status `processing`.
-
-This means every ingestion attempt gets operational traceability even before extraction succeeds.
-
-#### Step 3: existing concepts are fetched
-
-The system loads existing concepts from Supabase and passes them into the extraction prompt.
-
-This is a critical convergence step. It tells Claude:
-
-- if the file refers to an already known idea,
-- reuse the exact `name` and `subject`.
-
-This reduces duplicate nodes caused by wording variation.
-
-#### Step 4: Claude extracts curriculum map
-
-The WTR prompt asks Claude to return only:
-
-- concepts,
-- directed connections.
-
-No gaps are produced from WTR documents because these are not student-performance artifacts.
-
-The prompt instructs Claude to infer:
-
-- current week -> coming week sequencing,
-- prerequisite/build-on relationships,
-- justified cross-subject links,
-- concise canonical concept names.
-
-#### Step 5: concepts are upserted
-
-WTR concepts are upserted into `concepts`, again using `name + subject` for convergence.
-
-#### Step 6: curriculum edges are inserted
-
-Connections are inserted with:
-
-- `child_key = 'curriculum'`
-- `episode_id = null`
-- `wtr_upload_id = uploadId`
-
-This is what turns the shared graph into a curriculum-aware graph.
-
-#### Step 7: upload row is finalized
-
-On success:
-
-- status becomes `completed`,
-- `completed_at` is set,
-- summary JSON is stored.
-
-On failure:
-
-- status becomes `failed`,
-- `error_message` is stored.
-
-### 7.3 Flow C: graph retrieval -> tutoring context
-
-This flow is implemented in `lib/graph/context.ts`.
+**Implementation:** `lib/graph/context.ts`
 
 When preparing context for a tutoring session, the system retrieves:
 
-1. related concepts in the subject,
-2. prior connections in the subject from both student and curriculum layers,
-3. open gaps for the student,
-4. recently resolved gaps.
+1. Related concepts in the subject (up to 10).
+2. Prior connections from both student and curriculum layers for the subject (up to 12).
+3. Open gaps for the student in the subject (up to 5).
+4. Recently resolved gaps for reinforcement (up to 3).
 
-Important retrieval rule:
+`formatContextForPrompt()` converts this into a text block injected into the tutor system prompt, distinguishing gaps to address, recently mastered concepts, and syllabus/student connections.
 
-For connections, the query includes both:
+---
 
-- the child's own edges,
-- `curriculum` edges.
+## 7. Visualization Architecture
 
-That is the key integration point between personalized memory and school syllabus alignment.
+**Implementation:** `app/admin/graph/page.tsx`, `app/api/admin/graph/route.ts`
 
-#### Output shape
+### 7.1 Graph API
 
-The result is returned as `TopicGraphContext`:
+`/api/admin/graph` reads concepts and connections from Supabase, applies filters (subject, grade, search, source), trims to 220 concepts / 320 connections, and returns stats. It synthesizes concept objects for edge endpoints missing from the `concepts` table.
 
-- `related_concepts`
-- `prior_connections`
-- `open_gaps`
-- `resolved_gaps`
+### 7.2 Overview mode
 
-#### Prompt formatting
+When no concept is selected. Uses indegree reduction to compute directed levels, groups concepts into subject lanes, and places cross-subject concepts in a shared lane. This is a guided explanatory layout, not a force-directed graph.
 
-`formatContextForPrompt()` converts that structured context into a text block for future tutoring prompts.
+### 7.3 Focus mode
 
-It explicitly distinguishes:
+When a concept is selected. Mind-map layout with the selected concept center-left, prerequisites far left, immediate next ideas right, and second-order forward branches further right. Edge color distinguishes curriculum vs student provenance.
 
-- known gaps to address,
-- recently resolved concepts to reinforce but not re-teach,
-- connections from student memory and syllabus memory.
+### 7.4 Concept browser
 
-This is the bridge from persisted graph memory back into live tutoring behavior.
+Right-side panel with concept lookup, degree counts, selected concept details, and textual relationship listings.
 
-## 8. Visualization and Explorer Architecture
+---
 
-The admin visualization is implemented in:
+## 8. Prompt Design
 
-- `app/admin/graph/page.tsx`
-- `app/api/admin/graph/route.ts`
+### 8.1 Session extraction prompt
 
-The UI is not just a pretty graph. It is a diagnostic interface for understanding how the graph is evolving and whether extracted structure is useful.
+Asks Claude for meaningful concepts discussed, concept bridges, unresolved misunderstandings, and newly resolved gaps. Explicitly discourages noise.
 
-### 8.1 Graph API role
+### 8.2 WTR extraction prompt
 
-`/api/admin/graph` reads concepts and connections from Supabase and applies:
+Asks Claude for atomic syllabus ideas, sequencing, prerequisite relationships, and justified cross-subject links. Emphasizes reuse of existing concept labels passed in the prompt.
 
-- subject filters,
-- grade filters,
-- text search,
-- source filters (`all`, `curriculum`, `student`).
+---
 
-It returns:
+## 9. Critical Design Issues
 
-- visible concepts,
-- visible connections,
-- filter option lists,
-- summary stats,
-- trimming indicators.
+These are genuine problems in the current implementation, ordered by severity.
 
-### 8.2 Synthetic nodes
+### 9.1 ~~Session extraction does not receive existing concepts~~ FIXED
 
-If an edge references a concept that is not present in `concepts`, the API may synthesize a concept object in memory for display.
+`extractAndSaveGraph` now fetches existing concepts via `fetchExistingConceptsForPrompt()` and injects them into the extraction prompt, matching the WTR flow.
 
-This is an important architectural clue:
+### 9.2 ~~Gap resolution is blind~~ FIXED
 
-- the graph UI is resilient to imperfect database normalization,
-- edge data is treated as first-class evidence even if node persistence is incomplete.
+`extractAndSaveGraph` now queries open gaps for the child and includes them in the extraction prompt. The prompt instructs Claude to use the exact concept name from the open gaps list when reporting `gaps_resolved`.
 
-This keeps the explorer useful even when extraction or canonicalization is imperfect.
+### 9.3 ~~Grade is hardcoded in session extraction~~ FIXED
 
-### 8.3 Trimming strategy
+`extractAndSaveGraph` now accepts an optional `grade` parameter. The hardcoded `'6th Grade'` has been removed.
 
-For readability and performance, the API trims:
+### 9.4 ~~`topic` parameter is accepted but never used in context retrieval~~ FIXED
 
-- concepts to 220 visible nodes,
-- connections to 320 visible edges.
+`getTopicContext` now uses `topic` to fetch topic-matching concepts first (via `ilike`), then fills with broader subject concepts. Connections are also prioritized by topic relevance.
 
-It also returns flags:
+### 9.5 ~~`related_concepts` retrieval has no relevance ordering~~ FIXED
 
-- `trimmedConcepts`
-- `trimmedConnections`
+Topic-matching concepts are now fetched first and placed at the front of the list. Cross-subject concepts are also included. The result is capped at 15 instead of 10.
 
-This is a pragmatic UI safeguard rather than a core graph constraint.
+### 9.6 ~~Cross-subject context retrieval is asymmetric~~ PARTIALLY FIXED
 
-### 8.4 Overview mode
+`getTopicContext` now fetches up to 5 `cross_subject` type concepts regardless of subject filter. Topic-matching connections are also fetched across subjects. Transitive relevance (edges between two unrelated subjects) still does not surface.
 
-When no concept is selected, the explorer builds an overview map of the visible graph.
+### 9.7 ~~`ignoreDuplicates` asymmetry between flows~~ FIXED
 
-The overview layout does the following:
+Both session and WTR flows now use `ignoreDuplicates: true`. The rule is: first writer wins for concept metadata. Neither flow overwrites existing concept types or grades.
 
-1. ranks concepts by degree,
-2. computes directed levels using indegree reduction,
-3. groups concepts into subject lanes,
-4. places cross-subject or subjectless concepts into a shared lane,
-5. draws directional edges between laid-out nodes.
+### 9.8 No transaction safety in extraction saves — PARTIALLY FIXED
 
-This creates a lane-based visual topology:
+**Severity: Medium.**
 
-- subjects remain visually separated,
-- sequence-like structure is preserved across columns,
-- shared ideas float into a common lane.
+Both extraction flows still perform multiple sequential database operations without a transaction boundary. However, error propagation has been improved:
 
-It is not a force-directed graph. It is a guided explanatory layout optimized for educational interpretability.
+- `saveWtrGraphToDatabase` now returns an `errors[]` array.
+- The WTR process route now marks uploads as `failed` when sub-operations fail, instead of silently marking them `completed`.
+- `extractAndSaveGraph` now collects and logs all sub-operation errors.
 
-### 8.5 Focus mode
+Full transaction safety requires a Postgres RPC function, which remains a future improvement.
 
-When a concept is selected, the explorer switches to a focused mind-map layout.
+### 9.9 ~~IB key concepts are orphaned~~ FIXED
 
-The layout logic is intentionally pedagogical:
+Both the session extraction and WTR extraction prompts now include an explicit instruction to create connections to IB key concepts when relevant. The full list of 16 IB MYP key concepts is embedded in both prompts.
 
-- selected concept in the center-left,
-- prerequisites on the far left,
-- immediate next ideas on the right,
-- second-order forward branches further right.
+### 9.10 ~~NULL subject uniqueness does not hold in Postgres~~ FIXED
 
-This lets an admin inspect a concept in terms a tutor would care about:
+Migration `004_fix_null_subject_uniqueness.sql` replaces the original `unique(name, subject)` constraint with a `COALESCE`-based unique index that properly handles NULL subjects. It also deduplicates any existing rows.
 
-- what should come before,
-- what follows next,
-- what deeper branches this idea opens up.
+### 9.11 Relationship text is uncontrolled free text
 
-### 8.6 Edge semantics in the UI
+**Severity: Low.**
 
-Edges are visually differentiated by provenance:
+There is no taxonomy or normalization for relationship labels. Claude might produce `prerequisite for`, `is a prerequisite of`, `prerequisite`, `required before`, etc. These all create distinct edges with no way to query "show me all prerequisites."
 
-- curriculum edges,
-- student edges.
+**Fix:** Define a controlled vocabulary of relationship types and map free text to canonical labels either in the prompt or in a post-processing step.
 
-This matters because the same local neighborhood may contain:
+### 9.12 No graph pruning or versioning
 
-- school-defined progression,
-- student-discovered conceptual links.
+**Severity: Low (now), will increase.**
 
-Seeing both at once reveals whether tutoring memory is aligning with curriculum structure or diverging from it.
+Concepts and connections can never be deleted, superseded, or marked stale through the normal flow. There is no way to indicate that a newer WTR upload supersedes an older one's edges. Over time, the graph only grows. Edge duplication (9.13 below) compounds this.
 
-### 8.7 Concept browser and relationship list
+### 9.13 No edge deduplication
 
-The right-side browser complements the visual graph with:
+**Severity: Low (now), will increase.**
 
-- concept lookup,
-- degree counts,
-- selected concept details,
-- textual relationship listings.
+Repeated extractions can insert semantically duplicate edges. Over time this inflates degree counts and clutters the graph. The overview and focus layouts will become noisy.
 
-This is useful because graph diagrams alone can hide precise relationship wording. The list preserves the raw semantic labels extracted into the graph.
+### 9.14 RLS write policies are too permissive
 
-## 9. Prompt Design Strategy
+**Severity: Low (in current scope).**
 
-Prompt design is a central architectural component because extraction quality determines graph quality.
+The `INSERT` and `UPDATE` policies only check `auth.role() = 'authenticated'`. Any authenticated user can insert connections for any `child_key` or update any gap's status. There is no check that the user is the child or parent referenced.
 
-### 9.1 Session extraction prompt
+This is fine while the app only runs as a controlled family tool, but would be a real security issue in a multi-family deployment.
 
-The tutoring-session prompt is optimized for educational diagnosis.
+---
 
-It explicitly asks for:
+## 10. Current Strengths
 
-- meaningful concepts,
-- concept bridges,
-- unresolved misunderstandings,
-- newly resolved gaps.
+### 10.1 Unified concept space
+Both student understanding and school plans land in one graph, making retrieval powerful.
 
-The prompt discourages noise by asking for only ideas that were actually explored or explained.
+### 10.2 Easy LLM interoperability
+The data model is simple enough to be extracted by an LLM, re-injected into prompts, and visualized without heavy graph tooling.
 
-This is essential because transcripts contain a lot of conversational filler that should not become graph nodes.
+### 10.3 Strong inspectability
+Tables are readable, routes are straightforward, the graph UI is explicit, and raw relationship text is preserved.
 
-### 9.2 WTR extraction prompt
+### 10.4 Curriculum alignment built in
+The system tracks what the school intends alongside what the student discussed.
 
-The WTR prompt is optimized for curriculum structure.
+### 10.5 Supports interdisciplinary tutoring
+Cross-subject edges are first-class, supporting explanations that bridge domains.
 
-It asks Claude to identify:
+---
 
-- atomic ideas from syllabus documents,
-- sequencing relationships,
-- prerequisite or build-on relationships,
-- explicit cross-subject links where justified.
+## 11. Prioritized Improvement Roadmap
 
-It also emphasizes canonical reuse of existing concepts.
+### Phase 1: Fix blind spots — DONE
 
-### 9.3 Why prompt-injected existing concepts matter
+All four items have been implemented:
 
-The system does not currently perform a robust post-extraction ontology reconciliation pass.
+| Item | Status | Implementation |
+|------|--------|---------------|
+| Pass existing concepts to session extraction | Done | `extract.ts` now calls `fetchExistingConceptsForPrompt()` and injects results into prompt |
+| Pass open gaps to session extraction | Done | `extract.ts` now queries open gaps for the child and includes them in prompt; prompt instructs Claude to use exact gap names |
+| Parameterize grade | Done | `extractAndSaveGraph` now accepts optional `grade` parameter; hardcoded `'6th Grade'` removed |
+| Use `topic` in context retrieval | Done | `getTopicContext` now fetches topic-matching concepts first, then subject concepts, plus cross-subject concepts; connections are prioritized by topic relevance |
 
-Instead, it reduces duplication earlier by telling Claude:
+### Phase 2: Strengthen data integrity — DONE
 
-- here are existing concepts,
-- reuse exact labels when the meaning matches.
+| Item | Status | Implementation |
+|------|--------|---------------|
+| Fix NULL uniqueness | Done | Migration `004_fix_null_subject_uniqueness.sql` replaces `unique(name, subject)` with `COALESCE`-based unique index |
+| Decide upsert authority | Done | Both session and WTR flows now use `ignoreDuplicates: true` — first writer wins; neither flow overwrites existing concept metadata |
+| Check sub-operation errors in WTR | Done | `saveWtrGraphToDatabase` now returns `errors[]`; WTR process route marks upload as `failed` when sub-operations fail |
+| Add transaction boundaries | Open | Supabase JS client does not support multi-statement transactions natively; requires Postgres RPC function |
 
-This is a practical architecture choice:
+### Phase 2.5: IB key concepts activation — DONE
 
-- cheaper than full semantic matching after extraction,
-- easier to implement,
-- effective enough for early-stage graph convergence.
+| Item | Status | Implementation |
+|------|--------|---------------|
+| Connect IB key concepts in session extraction | Done | Session extraction prompt now instructs Claude to create connections to IB key concepts |
+| Connect IB key concepts in WTR extraction | Done | WTR extraction prompt now includes the same IB key concept instruction |
 
-## 10. Semantic Rules Embedded in the System
+### Phase 3: Improve graph quality
 
-The current design has several implicit rules that are worth making explicit.
+| Item | What to do | Why |
+|------|-----------|-----|
+| Connect IB key concepts | Add prompt instruction to link topics to IB key concepts | Makes seeded concepts useful |
+| Normalize relationship types | Define controlled vocabulary, map free text in post-processing | Enables structured graph queries |
+| Add edge deduplication | Unique constraint on normalized edge signature, or observation counts | Prevents graph noise |
+| Add concept foreign keys to edges | `concept_a_id`, `concept_b_id` with optional name snapshots | Enables renames, integrity, better queries |
 
-### 10.1 Node identity rule
+### Phase 4: Richer modeling
 
-A concept is currently identified by:
+| Item | What to do | Why |
+|------|-----------|-----|
+| Model curriculum time | Expose temporal navigation (this week, upcoming, prior term) | Enables syllabus-aware tutoring |
+| Enrich mastery modeling | Confidence scores, date last reinforced, misconception categories | Supports spaced repetition |
+| Add canonicalization pipeline | Post-extraction fuzzy matching and synonym merging | Reduces long-term graph fragmentation |
+| Add confidence metadata | Extraction confidence, model version, human-reviewed flag | Supports quality filtering |
 
-- `name`
-- `subject`
+---
 
-This means:
+## 12. Recommended Mental Model
 
-- same name + same subject = same canonical node,
-- same name + different subject = distinct concepts,
-- subjectless concepts form a shared pool.
+The simplest accurate model:
 
-### 10.2 Edge identity rule
+> Drona has a shared educational concept graph with two evidence overlays: what the school is teaching and what the student has experienced in tutoring. On top of that, it keeps a separate mastery ledger of unresolved and resolved misunderstandings.
 
-Edges currently do not have a business-key uniqueness constraint. Multiple rows may represent the same conceptual relationship if they are extracted multiple times.
+Or more compactly:
 
-This means connections act more like observations than canonical graph axioms.
+- `concepts` = vocabulary
+- `concept_connections` = evidence-backed links
+- `learning_gaps` = mastery state
+- `wtr_uploads` = curriculum ingestion history
 
-### 10.3 Direction rule
+---
 
-`concept_a` is always the source and `concept_b` the target.
+## 13. File Map
 
-The system uses this direction for:
+| File | Role |
+|------|------|
+| `supabase/migrations/002_knowledge_graph.sql` | Core schema: concepts, connections, gaps |
+| `supabase/migrations/003_wtr_curriculum.sql` | WTR uploads, curriculum child_key, schema evolution |
+| `lib/graph/types.ts` | TypeScript types for all graph entities |
+| `lib/graph/extract.ts` | Session transcript -> Claude extraction -> Supabase save |
+| `lib/graph/wtr.ts` | WTR document -> Claude extraction -> Supabase save |
+| `lib/graph/context.ts` | Graph retrieval -> prompt context formatting |
+| `lib/graph/test-graph.ts` | Manual test script for extraction and context |
+| `app/api/admin/graph/route.ts` | Graph API: filtered concept + connection retrieval |
+| `app/api/admin/wtr/route.ts` | WTR upload list API |
+| `app/api/admin/wtr/process/route.ts` | WTR upload processing API |
+| `app/admin/graph/page.tsx` | Graph explorer UI: overview + focus mode + browser |
+| `app/admin/wtr/page.tsx` | WTR upload admin UI |
 
-- prerequisite vs subsequent ideas,
-- curriculum sequencing,
-- overview layout levels,
-- focus-mode left/right branching.
+---
 
-### 10.4 Provenance rule
+## 14. Summary
 
-`child_key` functions as the edge-source channel:
-
-- real child values mean student evidence,
-- `curriculum` means syllabus evidence.
-
-This is a compact but important architectural trick. One column carries both audience scoping and source semantics.
-
-### 10.5 Gap lifecycle rule
-
-Learning gaps move through a simple lifecycle:
-
-1. extracted as unresolved,
-2. stored as `open`,
-3. later marked `resolved` when a session indicates understanding.
-
-This keeps mastery tracking simple and prompt-friendly.
-
-## 11. Current Strengths of the Architecture
-
-### 11.1 Unified concept space
-
-Both student understanding and school plans land in one graph, making later retrieval more powerful.
-
-### 11.2 Easy LLM interoperability
-
-The data model is simple enough to be:
-
-- extracted by an LLM,
-- re-injected into prompts,
-- visualized without heavy graph tooling.
-
-### 11.3 Strong inspectability
-
-The entire system is easy to reason about because:
-
-- tables are readable,
-- routes are straightforward,
-- graph UI is explicit,
-- raw relationship text is preserved.
-
-### 11.4 Curriculum alignment built in
-
-The system does not merely remember what the student discussed. It also tracks what the school intends, which is vital for practical tutoring.
-
-### 11.5 Supports interdisciplinary tutoring
-
-Because cross-subject edges are first-class, the graph can support explanations like:
-
-- mathematics concept -> science application,
-- IB key concept -> multiple subject topics.
-
-This is pedagogically valuable for concept transfer.
-
-## 12. Current Limitations and Architectural Trade-Offs
-
-The current implementation is good for an early-stage semantic memory system, but several limitations are important.
-
-### 12.1 Edge endpoints are string-based, not foreign-key-based
-
-Because `concept_connections` stores names and subjects instead of `concept_id` references:
-
-- endpoint integrity is soft,
-- concept renames are expensive,
-- duplicate naming errors can propagate,
-- explorer code must compensate with synthetic nodes.
-
-This is the biggest structural trade-off in the current architecture.
-
-### 12.2 No edge deduplication
-
-Repeated extractions can insert semantically duplicate edges. Over time this can inflate degree counts and clutter the graph.
-
-### 12.3 Grade is concept-level, not edge-level
-
-The grade is stored on concepts and upload metadata, but edge sequencing is not strongly grade-scoped beyond filtering behavior.
-
-This means the model is not yet a full curriculum versioning system.
-
-### 12.4 Subject-scoped context retrieval is shallow
-
-`getTopicContext()` retrieves a limited number of rows and filters by subject. This is practical, but it may miss useful cross-subject context if the relevant bridge sits outside the immediate subject window.
-
-### 12.5 Canonicalization depends heavily on prompt quality
-
-The system relies on Claude to reuse exact concept labels. This works reasonably well but is not guaranteed.
-
-### 12.6 Gap resolution matching is name-based
-
-Resolved gaps are updated by matching concept name strings. This is convenient, but brittle if the resolved concept label differs slightly from the originally stored gap label.
-
-## 13. Recommended Mental Model for the Team
-
-The simplest accurate mental model is:
-
-"Drona has a shared educational concept graph with two evidence overlays: what the school is teaching and what the student has experienced in tutoring. On top of that, it keeps a separate mastery ledger of unresolved and resolved misunderstandings."
-
-Or even more compactly:
-
-- `concepts` = vocabulary,
-- `concept_connections` = evidence-backed links,
-- `learning_gaps` = mastery state,
-- `wtr_uploads` = curriculum ingestion history.
-
-## 14. Suggested Evolution Path
-
-These are not required for the current system to function, but they are the natural next architectural improvements.
-
-### 14.1 Add concept foreign keys to edges
-
-Move from string endpoints to:
-
-- `concept_a_id`
-- `concept_b_id`
-
-while optionally retaining name snapshots for audit/debugging.
-
-This would improve:
-
-- integrity,
-- rename support,
-- deduplication,
-- query reliability.
-
-### 14.2 Introduce connection deduplication or weighting
-
-Possible approaches:
-
-- unique constraint on a normalized edge signature,
-- observation counts,
-- confidence scores,
-- source-specific weights.
-
-This would make the graph better at representing repeated evidence without exploding in row count.
-
-### 14.3 Add canonicalization pipeline after extraction
-
-Instead of relying only on prompt reuse, add a post-processing reconciliation step that:
-
-- fuzzy-matches extracted concepts,
-- confirms subject mapping,
-- merges synonyms into canonical nodes.
-
-### 14.4 Model curriculum time more explicitly
-
-The WTR system already stores:
-
-- period type,
-- label,
-- school year.
-
-The next step would be to expose temporal curriculum navigation, such as:
-
-- this week,
-- upcoming week,
-- prior term,
-- year progression.
-
-### 14.5 Attach confidence and provenance metadata
-
-For high-quality downstream tutoring, it may help to store:
-
-- extraction confidence,
-- extraction model version,
-- human-reviewed status,
-- edge source count.
-
-### 14.6 Promote gaps into richer mastery modeling
-
-The current open/resolved state is useful, but future versions could model:
-
-- confidence of mastery,
-- date last reinforced,
-- misconception categories,
-- prerequisite dependency of gaps.
-
-## 15. Summary
-
-The knowledge map architecture is a hybrid memory system for tutoring.
-
-It combines:
-
-- a shared graph of educational concepts,
-- personalized student-derived relationships,
-- curriculum-derived syllabus relationships,
-- and a separate mastery-tracking system for learning gaps.
+The knowledge map architecture is a hybrid memory system for tutoring that combines a shared concept graph, personalized student relationships, curriculum-derived relationships, and mastery tracking.
 
 Its most important architectural insight is that student understanding and curriculum structure should live in the same conceptual space, but remain distinguishable by provenance.
 
-That allows Drona to be:
+Its most important current weakness is that the two extraction flows have different canonicalization behavior: WTR extraction receives existing concepts for reuse while session extraction does not, and gap resolution operates without knowledge of existing gaps.
 
-- longitudinal across sessions,
-- aligned with school teaching,
-- personalized to the learner,
-- inspectable by humans,
-- and usable by LLM-based tutoring flows.
-
-In its current form, the system is best described as a practical semantic graph built for educational memory rather than a fully normalized graph platform. That makes it simple, flexible, and already useful, while leaving clear room for stronger canonicalization and graph integrity as the product matures.
+The system is a practical semantic graph built for educational memory. It is simple, flexible, and already useful. The prioritized roadmap above addresses the real design issues before they compound.

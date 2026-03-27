@@ -138,7 +138,7 @@ export default function WtrAdminPage() {
   }
 
   return (
-    <main style={{ maxWidth: '1180px' }}>
+    <main>
       <div className="wtr-menu-bar">
         <div className="wtr-menu-group">
           <a href="#upload" className="wtr-menu-pill wtr-menu-pill-active">

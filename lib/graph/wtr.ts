@@ -1,43 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ConceptType, WtrGraphExtraction } from './types'
+import { getSharedRules, getWtrExtractionPrompt, formatExistingConceptsBlock } from './prompts'
 
 const anthropic = new Anthropic()
-
-const WTR_EXTRACTION_PROMPT = `You are parsing a school syllabus document (often called "Weekly Transaction" / WTR).
-It is usually a table: Subject, teacher, Current Week topics, Coming Week topics, sometimes tests.
-
-Your job: extract a knowledge map as JSON only — no markdown, no commentary.
-
-Return ONLY valid JSON matching this schema:
-{
-  "concepts": [
-    { "name": string, "subject": string, "type": "topic_concept" | "ib_key_concept" | "cross_subject" }
-  ],
-  "connections": [
-    {
-      "concept_a": string,
-      "concept_b": string,
-      "subject_a": string,
-      "subject_b": string,
-      "relationship": string
-    }
-  ]
-}
-
-Rules:
-1. concepts[] — atomic ideas named in the document (2–6 words), one row per distinct idea across subjects.
-   - subject must match the column (e.g. "Mathematics", "Science", "Language & Literature", "History", "Geography", "French").
-   - Use "cross_subject" only when the edge explicitly bridges two subjects.
-2. connections[] — directed relationships, for example:
-   - Current week topic → Coming week topic within the SAME subject: relationship "next in school syllabus" or "follows in schedule".
-   - Prerequisite / builds on: "builds on", "applies", "extends".
-   - Cross-subject links only when justified by the text (e.g. statistics in Math linked to data in Science).
-3. EXISTING CONCEPTS: A list of known concepts from our database is provided below.
-   - When a string in the document refers to the SAME idea as an existing concept, reuse the EXACT "name" and "subject" from that list so we merge cleanly.
-   - If it is new, invent a concise canonical name (do not duplicate list entries with new spelling).
-4. If the document is unclear, still extract what you can; use empty arrays where nothing applies.
-5. Output ONLY the JSON object.`
 
 function buildMediaBlock(mimeType: string, base64: string): Anthropic.Messages.ContentBlockParam[] {
   if (mimeType === 'application/pdf') {
@@ -95,24 +61,18 @@ export async function extractWtrGraph(params: {
   periodLabel: string
   existingConcepts: Array<{ name: string; subject: string | null; type: string }>
 }): Promise<WtrGraphExtraction> {
-  const existingJson = JSON.stringify(
-    params.existingConcepts.map(c => ({
-      name: c.name,
-      subject: c.subject,
-      type: c.type,
-    })),
-    null,
-    0
-  )
+  const textIntro = `${getSharedRules()}
 
-  const textIntro = `${WTR_EXTRACTION_PROMPT}
+${getWtrExtractionPrompt()}
+
+---
 
 Metadata:
 - Grade: ${params.grade ?? 'unknown'}
 - Report period: ${params.periodLabel}
 
 Existing concepts in database (reuse exact name+subject when same meaning):
-${existingJson}
+${formatExistingConceptsBlock(params.existingConcepts)}
 
 Document:`
 
@@ -142,13 +102,20 @@ Document:`
   return parsed
 }
 
+export interface WtrSaveResult {
+  conceptRows: number
+  connectionRows: number
+  errors: string[]
+}
+
 export async function saveWtrGraphToDatabase(params: {
   supabase: SupabaseClient
   extraction: WtrGraphExtraction
   wtrUploadId: string
   grade: string | null
-}): Promise<{ conceptRows: number; connectionRows: number }> {
+}): Promise<WtrSaveResult> {
   const { supabase, extraction, wtrUploadId, grade } = params
+  const errors: string[] = []
 
   let conceptRows = 0
   if (extraction.concepts.length > 0) {
@@ -159,10 +126,11 @@ export async function saveWtrGraphToDatabase(params: {
         type: c.type as ConceptType,
         grade: grade ?? null,
       })),
-      { onConflict: 'name,subject' }
+      { onConflict: 'name,subject', ignoreDuplicates: true }
     )
     if (error) {
       console.error('[graph/wtr] concepts upsert error:', error)
+      errors.push(`concepts: ${error.message}`)
     } else {
       conceptRows = extraction.concepts.length
     }
@@ -184,10 +152,11 @@ export async function saveWtrGraphToDatabase(params: {
     )
     if (error) {
       console.error('[graph/wtr] connections insert error:', error)
+      errors.push(`connections: ${error.message}`)
     } else {
       connectionRows = extraction.connections.length
     }
   }
 
-  return { conceptRows, connectionRows }
+  return { conceptRows, connectionRows, errors }
 }

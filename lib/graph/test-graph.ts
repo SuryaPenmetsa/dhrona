@@ -6,6 +6,7 @@ const MOCK_SESSION = {
   episodeId: 'test-episode-001',
   subject: 'Mathematics',
   topic: 'Quadratic Equations',
+  grade: 'Grade 6',
   messages: [
     {
       role: 'user' as const,
