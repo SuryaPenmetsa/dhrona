@@ -358,7 +358,7 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
   )
   if (!rankedConcepts.length) return null
 
-  const indegree = new Map(rankedConcepts.map(node => [node.key, 0] as const))
+  const indegree = new Map<string, number>(rankedConcepts.map(node => [node.key, 0]))
   rankedConcepts.forEach(node => {
     ;(graphIndex.outgoing.get(node.key) ?? []).forEach(edge => {
       indegree.set(edge.toKey, (indegree.get(edge.toKey) ?? 0) + 1)
@@ -421,12 +421,6 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
     changed = false
     expandedKeys.forEach(key => {
       if (!visibleKeys.has(key)) return
-      ;(graphIndex.incoming.get(key) ?? []).forEach(edge => {
-        if (!visibleKeys.has(edge.fromKey)) {
-          visibleKeys.add(edge.fromKey)
-          changed = true
-        }
-      })
       ;(graphIndex.outgoing.get(key) ?? []).forEach(edge => {
         if (!visibleKeys.has(edge.toKey)) {
           visibleKeys.add(edge.toKey)
@@ -448,9 +442,48 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
     })
   })
 
-  const visibleLevels = Array.from(visibleKeys).map(key => levels.get(key) ?? 0)
-  const minVisibleLevel = Math.min(...visibleLevels)
-  const maxVisibleLevel = Math.max(...visibleLevels)
+  const visibleIncomingCount = new Map<string, number>(Array.from(visibleKeys).map(key => [key, 0]))
+  const visibleOutgoing = new Map<string, MindMapEdge[]>(Array.from(visibleKeys).map(key => [key, []]))
+  const visibleIncoming = new Map<string, MindMapEdge[]>(Array.from(visibleKeys).map(key => [key, []]))
+  edges.forEach(edge => {
+    visibleIncomingCount.set(edge.toKey, (visibleIncomingCount.get(edge.toKey) ?? 0) + 1)
+    visibleOutgoing.get(edge.fromKey)?.push(edge)
+    visibleIncoming.get(edge.toKey)?.push(edge)
+  })
+
+  const displayQueue = Array.from(visibleKeys)
+    .filter(key => (visibleIncomingCount.get(key) ?? 0) === 0)
+    .sort((a, b) => {
+      const conceptA = graphIndex.conceptsByKey.get(a)
+      const conceptB = graphIndex.conceptsByKey.get(b)
+      if (!conceptA || !conceptB) return a.localeCompare(b)
+      const laneCompare = laneOf(conceptA).localeCompare(laneOf(conceptB))
+      return laneCompare || conceptA.name.localeCompare(conceptB.name)
+    })
+
+  const displayLevels = new Map<string, number>()
+  while (displayQueue.length) {
+    const key = displayQueue.shift()
+    if (!key) continue
+    const baseLevel = displayLevels.get(key) ?? 0
+    for (const edge of visibleOutgoing.get(key) ?? []) {
+      displayLevels.set(edge.toKey, Math.max(displayLevels.get(edge.toKey) ?? 0, baseLevel + 1))
+      visibleIncomingCount.set(edge.toKey, (visibleIncomingCount.get(edge.toKey) ?? 1) - 1)
+      if ((visibleIncomingCount.get(edge.toKey) ?? 0) === 0) {
+        displayQueue.push(edge.toKey)
+      }
+    }
+  }
+
+  Array.from(visibleKeys).forEach(key => {
+    if (displayLevels.has(key)) return
+    const inboundLevel = Math.max(-1, ...(visibleIncoming.get(key) ?? []).map(edge => displayLevels.get(edge.fromKey) ?? -1))
+    displayLevels.set(key, inboundLevel + 1)
+  })
+
+  const visibleLevelValues = Array.from(visibleKeys).map(key => displayLevels.get(key) ?? 0)
+  const minVisibleLevel = Math.min(...visibleLevelValues)
+  const maxVisibleLevel = Math.max(...visibleLevelValues)
   const columnWidth = 236
   const columnGap = 124
   const rowGap = 84
@@ -466,14 +499,73 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
     const laneNodes = (laneMap.get(subject) ?? []).filter(node => visibleKeys.has(node.key))
     const columns = new Map<number, RankedConcept[]>()
     laneNodes.forEach(node => {
-      const level = levels.get(node.key) ?? 0
+      const level = displayLevels.get(node.key) ?? 0
       if (!columns.has(level)) columns.set(level, [])
       columns.get(level)?.push(node)
     })
 
     const orderedLevels = Array.from(columns.keys()).sort((a, b) => a - b)
-    const maxRows = Math.max(1, ...orderedLevels.map(level => columns.get(level)?.length ?? 0))
-    const laneHeight = laneHeaderHeight + lanePadding * 2 + Math.max(56, maxRows * rowGap - 28)
+    const relativeY = new Map<string, number>()
+
+    orderedLevels.forEach((level, levelIndex) => {
+      const columnNodes = [...(columns.get(level) ?? [])]
+      if (levelIndex === 0) {
+        columnNodes.sort((a, b) => a.name.localeCompare(b.name))
+        columnNodes.forEach((node, index) => {
+          relativeY.set(node.key, index * rowGap)
+        })
+        return
+      }
+
+      columnNodes.sort((a, b) => {
+        const parentsA = (visibleIncoming.get(a.key) ?? [])
+          .map(edge => relativeY.get(edge.fromKey))
+          .filter((value): value is number => value !== undefined)
+        const parentsB = (visibleIncoming.get(b.key) ?? [])
+          .map(edge => relativeY.get(edge.fromKey))
+          .filter((value): value is number => value !== undefined)
+        const avgA =
+          parentsA.length > 0 ? parentsA.reduce((sum, value) => sum + value, 0) / parentsA.length : Number.MAX_SAFE_INTEGER
+        const avgB =
+          parentsB.length > 0 ? parentsB.reduce((sum, value) => sum + value, 0) / parentsB.length : Number.MAX_SAFE_INTEGER
+        return avgA - avgB || a.name.localeCompare(b.name)
+      })
+
+      const groups = new Map<string, RankedConcept[]>()
+      columnNodes.forEach(node => {
+        const parentKeys = (visibleIncoming.get(node.key) ?? [])
+          .map(edge => edge.fromKey)
+          .sort()
+        const groupKey = parentKeys.join('|') || node.key
+        if (!groups.has(groupKey)) groups.set(groupKey, [])
+        groups.get(groupKey)?.push(node)
+      })
+
+      const occupied: number[] = []
+      Array.from(groups.values()).forEach(groupNodes => {
+        const parentTargets = groupNodes
+          .flatMap(node => (visibleIncoming.get(node.key) ?? []).map(edge => relativeY.get(edge.fromKey)))
+          .filter((value): value is number => value !== undefined)
+
+        const centerY =
+          parentTargets.length > 0
+            ? parentTargets.reduce((sum, value) => sum + value, 0) / parentTargets.length
+            : occupied.length * rowGap
+
+        const startY = centerY - ((groupNodes.length - 1) * rowGap) / 2
+        groupNodes.forEach((node, index) => {
+          let candidateY = startY + index * rowGap
+          while (occupied.some(value => Math.abs(value - candidateY) < rowGap * 0.9)) {
+            candidateY += rowGap
+          }
+          relativeY.set(node.key, candidateY)
+          occupied.push(candidateY)
+        })
+      })
+    })
+
+    const maxRelativeY = Math.max(0, ...laneNodes.map(node => relativeY.get(node.key) ?? 0))
+    const laneHeight = laneHeaderHeight + lanePadding * 2 + Math.max(56, maxRelativeY + 56)
     const laneNodeTop = currentY + laneHeaderHeight + lanePadding
 
     lanes.push({
@@ -485,7 +577,6 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
 
     orderedLevels.forEach(level => {
       const columnNodes = columns.get(level) ?? []
-      columnNodes.sort((a, b) => a.name.localeCompare(b.name))
       columnNodes.forEach((node, index) => {
         nodes.push({
           key: node.key,
@@ -493,7 +584,7 @@ function buildOverviewMap(graphIndex: GraphIndex, expandedKeys: Set<string>): Mi
           subject: node.subject,
           type: node.type,
           x: marginX + (level - minVisibleLevel) * (columnWidth + columnGap),
-          y: laneNodeTop + index * rowGap,
+          y: laneNodeTop + (relativeY.get(node.key) ?? index * rowGap),
           width: columnWidth,
           height: 56,
           level: 'overview',
