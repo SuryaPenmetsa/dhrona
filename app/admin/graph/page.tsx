@@ -1,8 +1,8 @@
 'use client'
 
-import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Concept, ConceptConnection, ConceptType } from '@/lib/graph/types'
+import AdminModuleNav from '@/components/navigation/AdminModuleNav'
 
 type GraphSource = 'all' | 'curriculum' | 'student'
 
@@ -736,12 +736,7 @@ export default function GraphAdminPage() {
 
   return (
     <main className="graph-page">
-      <div className="admin-nav">
-        <Link href="/">Home</Link>
-        <Link href="/admin">Admin</Link>
-        <Link href="/admin/wtr">WTR Upload</Link>
-        <Link href="/admin/access">Access</Link>
-      </div>
+      <AdminModuleNav />
 
       <h1>Knowledge graph explorer</h1>
       <p className="lead">

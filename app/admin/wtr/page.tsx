@@ -1,7 +1,7 @@
 'use client'
 
-import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
+import AdminModuleNav from '@/components/navigation/AdminModuleNav'
 
 type Period = 'weekly' | 'monthly' | 'term' | 'yearly' | 'other'
 
@@ -131,6 +131,8 @@ export default function WtrAdminPage() {
 
   return (
     <main>
+      <AdminModuleNav />
+
       <div className="wtr-menu-bar">
         <div className="wtr-menu-group">
           <a href="#upload" className="wtr-menu-pill wtr-menu-pill-active">
@@ -139,20 +141,6 @@ export default function WtrAdminPage() {
           <a href="#recent-uploads" className="wtr-menu-pill">
             Recent uploads
           </a>
-          <Link href="/admin/graph" className="wtr-menu-pill">
-            Graph explorer
-          </Link>
-          <Link href="/admin/access" className="wtr-menu-pill">
-            Access
-          </Link>
-        </div>
-        <div className="wtr-menu-group">
-          <Link href="/admin" className="wtr-menu-link">
-            Admin
-          </Link>
-          <Link href="/" className="wtr-menu-link">
-            Home
-          </Link>
         </div>
       </div>
 

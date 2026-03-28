@@ -502,6 +502,64 @@ th {
   margin-bottom: 1rem;
 }
 
+.admin-module-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #11161f;
+}
+
+.admin-module-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.admin-module-tab {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #0f1520;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.84rem;
+}
+
+.admin-module-tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.admin-module-tab-active {
+  color: var(--text);
+  border-color: rgba(91, 143, 216, 0.45);
+  background: linear-gradient(180deg, rgba(91, 143, 216, 0.2), rgba(91, 143, 216, 0.08));
+}
+
+.admin-module-links {
+  display: inline-flex;
+  align-items: center;
+}
+
+.admin-module-home-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.84rem;
+  padding: 0.25rem 0.4rem;
+}
+
+.admin-module-home-link:hover {
+  color: var(--text);
+}
+
 .graph-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -2016,5 +2074,10 @@ th {
 
   .access-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-module-nav {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

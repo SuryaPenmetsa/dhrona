@@ -1,14 +1,10 @@
 import Link from 'next/link'
+import AdminModuleNav from '@/components/navigation/AdminModuleNav'
 
 export default function AdminModulePage() {
   return (
     <main>
-      <div className="admin-nav">
-        <Link href="/">Home</Link>
-        <Link href="/admin/wtr">WTR Upload</Link>
-        <Link href="/admin/graph">Graph</Link>
-        <Link href="/admin/access">Access</Link>
-      </div>
+      <AdminModuleNav />
 
       <h1>Admin module</h1>
       <p className="lead">

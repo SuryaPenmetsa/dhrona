@@ -1,7 +1,7 @@
 'use client'
 
-import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
+import AdminModuleNav from '@/components/navigation/AdminModuleNav'
 
 type AppRole = 'admin' | 'member'
 
@@ -114,13 +114,7 @@ export default function AdminAccessPage() {
 
   return (
     <main>
-      <div className="admin-nav">
-        <Link href="/">Home</Link>
-        <Link href="/admin">Admin</Link>
-        <Link href="/admin/wtr">WTR Upload</Link>
-        <Link href="/admin/graph">Graph</Link>
-        <Link href="/admin/access">Access</Link>
-      </div>
+      <AdminModuleNav />
 
       <h1>Admin access control</h1>
       <p className="lead">

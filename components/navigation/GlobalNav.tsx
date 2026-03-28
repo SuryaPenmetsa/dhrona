@@ -18,9 +18,6 @@ const navItems: NavItem[] = [
   { label: 'Review', href: '/review' },
   { label: 'Parent', href: '/parent' },
   { label: 'Admin', href: '/admin', adminOnly: true },
-  { label: 'Syllabus Upload', href: '/admin/wtr', adminOnly: true },
-  { label: 'Graph', href: '/admin/graph', adminOnly: true },
-  { label: 'Access', href: '/admin/access', adminOnly: true },
 ]
 
 function isActive(pathname: string, href: string) {
