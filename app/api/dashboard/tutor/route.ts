@@ -35,6 +35,7 @@ type PersistedMessageRow = {
 
 type EpisodeRow = {
   id: string
+  owner_user_id: string | null
   child_key: string
   map_topic: string
   map_subject: string | null
@@ -46,7 +47,10 @@ type LearningProfileRow = {
   id: string
   name: string
   llm_instructions_rich_text: string
+  suggestion_question_instructions_rich_text: string
 }
+
+const SUGGESTION_MODEL_ID = process.env.ANTHROPIC_SUGGESTION_MODEL_ID?.trim() || 'claude-3-5-haiku-latest'
 
 function buildSuggestedPrompts({
   nodeName,
@@ -75,6 +79,98 @@ function buildSuggestedPrompts({
       ? `Where will ${nodeName} help me next in ${firstDownstream}?`
       : `What fun topic can we explore after ${nodeName}?`,
   ]
+}
+
+async function generateSuggestedPrompts({
+  nodeName,
+  learningProfile,
+  upstream,
+  downstream,
+  recentQuestion,
+  recentAnswer,
+}: {
+  nodeName: string
+  learningProfile: LearningProfileRow | null
+  upstream: string[]
+  downstream: string[]
+  recentQuestion?: string
+  recentAnswer?: string
+}) {
+  const fallbackPrompts = buildSuggestedPrompts({
+    nodeName,
+    learningProfile,
+    upstream,
+    downstream,
+  })
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return fallbackPrompts
+  }
+
+  try {
+    const suggestionInstructions = learningProfile?.suggestion_question_instructions_rich_text?.trim() || ''
+    const fallbackTutorInstructions = learningProfile?.llm_instructions_rich_text?.trim() || ''
+    const effectiveInstructions = suggestionInstructions || fallbackTutorInstructions
+
+    const llmSettings = await getLlmSettingsWithServiceClient()
+    const candidateModels = [SUGGESTION_MODEL_ID, llmSettings.tutorModelId].filter(Boolean)
+
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+    let raw = ''
+
+    for (const modelId of candidateModels) {
+      try {
+        const response = await anthropic.messages.create({
+          model: modelId,
+          max_tokens: 260,
+          system:
+            'You write exactly 4 concise follow-up learner questions for a tutor chat. ' +
+            'Return plain text with one question per line and nothing else. ' +
+            'Each question must be age-friendly, specific to the concept, and under 120 characters. ' +
+            'If profile suggestion instructions are provided, treat them as high-priority constraints.',
+          messages: [
+            {
+              role: 'user',
+              content: `Create 4 follow-up learner questions.
+
+Concept: ${nodeName}
+Prerequisites: ${upstream.length ? upstream.join(', ') : 'None provided'}
+Next concepts: ${downstream.length ? downstream.join(', ') : 'None provided'}
+Recent learner question: ${recentQuestion?.trim() || 'N/A'}
+Recent tutor answer: ${recentAnswer?.trim() || 'N/A'}
+Profile suggestion instructions (high priority, apply silently):
+${effectiveInstructions || 'No custom profile instructions.'}`,
+            },
+          ],
+        })
+
+        raw = response.content
+          .filter(part => part.type === 'text')
+          .map(part => part.text)
+          .join('\n')
+          .trim()
+        if (raw) break
+      } catch (err) {
+        const status = typeof err === 'object' && err !== null ? (err as { status?: number }).status : undefined
+        // Keep trying fallback models only for model-not-found errors.
+        if (status !== 404) throw err
+      }
+    }
+
+    const parsed = raw
+      .split('\n')
+      .map(line => line.replace(/^\s*(?:[-*]\s*|\d+[\.\)]\s*)/, '').trim())
+      .filter(Boolean)
+      .slice(0, 4)
+
+    if (parsed.length >= 3) {
+      return parsed
+    }
+  } catch (err) {
+    console.error('[tutor] failed to generate Haiku suggestions:', err)
+  }
+
+  return fallbackPrompts
 }
 
 function fallbackTutorReply(payload: TutorRequest): string {
@@ -130,11 +226,13 @@ async function resolveLearningProfileForCurrentUser() {
 
     const { data: profile, error: profileError } = await service
       .from('learning_profiles')
-      .select('id, name, llm_instructions_rich_text')
+      .select('id, name, llm_instructions_rich_text, suggestion_question_instructions_rich_text')
       .eq('id', assignment.learning_profile_id)
       .maybeSingle()
 
-    if (profileError || !profile?.llm_instructions_rich_text?.trim()) {
+    const hasTutorInstructions = Boolean(profile?.llm_instructions_rich_text?.trim())
+    const hasSuggestionInstructions = Boolean(profile?.suggestion_question_instructions_rich_text?.trim())
+    if (profileError || !profile || (!hasTutorInstructions && !hasSuggestionInstructions)) {
       return null
     }
 
@@ -147,12 +245,14 @@ async function resolveLearningProfileForCurrentUser() {
 
 async function resolveEpisodeId({
   requestedEpisodeId,
+  ownerUserId,
   mapTopic,
   mapSubject,
   nodeName,
   nodeSubject,
 }: {
   requestedEpisodeId?: string
+  ownerUserId: string
   mapTopic: string
   mapSubject: string | null
   nodeName: string
@@ -165,6 +265,7 @@ async function resolveEpisodeId({
       .from('tutor_chat_episodes')
       .select('id')
       .eq('id', requestedEpisodeId)
+      .eq('owner_user_id', ownerUserId)
       .maybeSingle()
     if (data?.id) return data.id
   }
@@ -172,6 +273,7 @@ async function resolveEpisodeId({
   const { data: candidates } = await supabase
     .from('tutor_chat_episodes')
     .select('id, map_subject, node_subject')
+    .eq('owner_user_id', ownerUserId)
     .eq('child_key', 'curriculum')
     .eq('map_topic', mapTopic)
     .eq('node_name', nodeName)
@@ -185,6 +287,7 @@ async function resolveEpisodeId({
   const { data: inserted, error: insertError } = await supabase
     .from('tutor_chat_episodes')
     .insert({
+      owner_user_id: ownerUserId,
       child_key: 'curriculum',
       map_topic: mapTopic,
       map_subject: mapSubject,
@@ -199,6 +302,14 @@ async function resolveEpisodeId({
 
 export async function GET(request: Request) {
   try {
+    const userClient = await createClient()
+    const {
+      data: { user },
+    } = await userClient.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    }
+
     const { searchParams } = new URL(request.url)
     const mapTopic = searchParams.get('map_topic')?.trim()
     const nodeName = searchParams.get('node_name')?.trim()
@@ -215,7 +326,7 @@ export async function GET(request: Request) {
     const supabase = createServiceClient()
     const { data: episodes, error: episodeError } = await supabase
       .from('tutor_chat_episodes')
-      .select('id, child_key, map_topic, map_subject, node_name, node_subject')
+      .select('id, owner_user_id, child_key, map_topic, map_subject, node_name, node_subject')
       .eq('child_key', 'curriculum')
       .eq('map_topic', mapTopic)
       .eq('node_name', nodeName)
@@ -225,12 +336,28 @@ export async function GET(request: Request) {
       throw new Error(episodeError.message)
     }
 
-    const episode = ((episodes ?? []) as EpisodeRow[]).find(
+    const allCandidates = (episodes ?? []) as EpisodeRow[]
+    const sharedEpisodeIds = allCandidates.map(item => item.id)
+    let sharedWithMe = new Set<string>()
+    if (sharedEpisodeIds.length > 0) {
+      const { data: shareRows } = await supabase
+        .from('tutor_episode_shares')
+        .select('episode_id')
+        .in('episode_id', sharedEpisodeIds)
+        .eq('shared_with_user_id', user.id)
+      sharedWithMe = new Set((shareRows ?? []).map(row => (row as { episode_id: string }).episode_id))
+    }
+
+    const visibleCandidates = allCandidates.filter(
+      item => item.owner_user_id === user.id || sharedWithMe.has(item.id)
+    )
+
+    const episode = visibleCandidates.find(
       item => sameNullableText(item.map_subject, mapSubject) && sameNullableText(item.node_subject, nodeSubject)
     )
 
     if (!episode) {
-      const suggestedPrompts = buildSuggestedPrompts({
+      const suggestedPrompts = await generateSuggestedPrompts({
         nodeName,
         learningProfile,
         upstream: [],
@@ -258,11 +385,21 @@ export async function GET(request: Request) {
     return NextResponse.json({
       episodeId: episode.id,
       messages: (messages ?? []) as PersistedMessageRow[],
-      suggestedPrompts: buildSuggestedPrompts({
+      suggestedPrompts: await generateSuggestedPrompts({
         nodeName,
         learningProfile,
         upstream: [],
         downstream: [],
+        recentQuestion:
+          [...((messages ?? []) as PersistedMessageRow[])]
+            .reverse()
+            .find(message => message.role === 'user')
+            ?.content ?? undefined,
+        recentAnswer:
+          [...((messages ?? []) as PersistedMessageRow[])]
+            .reverse()
+            .find(message => message.role === 'assistant')
+            ?.content ?? undefined,
       }),
       learningProfileApplied,
       learningProfileName: learningProfile?.name ?? null,
@@ -275,6 +412,14 @@ export async function GET(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const userClient = await createClient()
+    const {
+      data: { user },
+    } = await userClient.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    }
+
     const { searchParams } = new URL(request.url)
     const episodeId = searchParams.get('episode_id')?.trim()
     if (!episodeId) {
@@ -282,6 +427,22 @@ export async function DELETE(request: Request) {
     }
 
     const supabase = createServiceClient()
+    const { data: episode, error: episodeError } = await supabase
+      .from('tutor_chat_episodes')
+      .select('owner_user_id')
+      .eq('id', episodeId)
+      .maybeSingle()
+    if (episodeError) throw new Error(episodeError.message)
+    if (!episode) {
+      return NextResponse.json({ error: 'Episode not found' }, { status: 404 })
+    }
+
+    const { data: roleRow } = await supabase.from('user_roles').select('role').eq('user_id', user.id).maybeSingle()
+    const isAdmin = roleRow?.role === 'admin'
+    if (!isAdmin && episode.owner_user_id !== user.id) {
+      return NextResponse.json({ error: 'Not allowed' }, { status: 403 })
+    }
+
     const { error } = await supabase.from('tutor_chat_episodes').delete().eq('id', episodeId)
     if (error) throw new Error(error.message)
 
@@ -294,6 +455,14 @@ export async function DELETE(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const userClient = await createClient()
+    const {
+      data: { user },
+    } = await userClient.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 })
+    }
+
     const body = (await request.json()) as TutorRequest
     const question = body.question?.trim()
     const nodeName = body.node?.name?.trim()
@@ -316,6 +485,7 @@ export async function POST(request: Request) {
     try {
       episodeId = await resolveEpisodeId({
         requestedEpisodeId: body.episodeId,
+        ownerUserId: user.id,
         mapTopic,
         mapSubject,
         nodeName,
@@ -331,12 +501,6 @@ export async function POST(request: Request) {
 
     const learningProfile = await resolveLearningProfileForCurrentUser()
     const learningProfileApplied = Boolean(learningProfile?.llm_instructions_rich_text?.trim())
-    const suggestedPrompts = buildSuggestedPrompts({
-      nodeName,
-      learningProfile,
-      upstream,
-      downstream,
-    })
 
     if (process.env.ANTHROPIC_API_KEY) {
       const baseInstruction =
@@ -404,6 +568,15 @@ Respond as Tutor in a practical, encouraging style.`,
         fallback = false
       }
     }
+
+    const suggestedPrompts = await generateSuggestedPrompts({
+      nodeName,
+      learningProfile,
+      upstream,
+      downstream,
+      recentQuestion: question,
+      recentAnswer: answer,
+    })
 
     if (episodeId) {
       try {

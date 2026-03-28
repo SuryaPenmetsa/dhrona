@@ -8,6 +8,7 @@ type LearningProfile = {
   name: string
   personality_summary: string | null
   llm_instructions_rich_text: string
+  suggestion_question_instructions_rich_text: string
   created_at: string
   updated_at: string
 }
@@ -43,6 +44,7 @@ const EMPTY_CREATE = {
   name: '',
   personalitySummary: '',
   llmInstructionsRichText: '',
+  suggestionQuestionInstructionsRichText: '',
 }
 
 const EMPTY_GENERATOR = {
@@ -141,6 +143,7 @@ export default function LearningProfilesAdminPage() {
           name: selectedProfile.name,
           personalitySummary: selectedProfile.personality_summary,
           llmInstructionsRichText: selectedProfile.llm_instructions_rich_text,
+          suggestionQuestionInstructionsRichText: selectedProfile.suggestion_question_instructions_rich_text,
         }),
       })
       const data = (await res.json()) as { error?: string }
@@ -242,7 +245,11 @@ export default function LearningProfilesAdminPage() {
   }
 
   function updateSelectedProfile(
-    field: 'name' | 'personality_summary' | 'llm_instructions_rich_text',
+    field:
+      | 'name'
+      | 'personality_summary'
+      | 'llm_instructions_rich_text'
+      | 'suggestion_question_instructions_rich_text',
     value: string
   ) {
     if (!selectedProfile) return
@@ -464,6 +471,21 @@ export default function LearningProfilesAdminPage() {
                   required
                 />
               </div>
+              <div>
+                <label htmlFor="create-suggestion-instructions">Suggestion question instructions (optional)</label>
+                <textarea
+                  id="create-suggestion-instructions"
+                  rows={8}
+                  value={createForm.suggestionQuestionInstructionsRichText}
+                  onChange={event =>
+                    setCreateForm(prev => ({
+                      ...prev,
+                      suggestionQuestionInstructionsRichText: event.target.value,
+                    }))
+                  }
+                  placeholder="Optional guidance for follow-up suggested questions (tone, format, difficulty progression)."
+                />
+              </div>
 
               <button className="primary" type="submit" disabled={saving}>
                 {saving ? 'Saving...' : 'Create profile'}
@@ -527,6 +549,18 @@ export default function LearningProfilesAdminPage() {
                             updateSelectedProfile('llm_instructions_rich_text', event.target.value)
                           }
                           required
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="edit-suggestion-instructions">Suggestion question instructions</label>
+                        <textarea
+                          id="edit-suggestion-instructions"
+                          rows={8}
+                          value={selectedProfile.suggestion_question_instructions_rich_text}
+                          onChange={event =>
+                            updateSelectedProfile('suggestion_question_instructions_rich_text', event.target.value)
+                          }
+                          placeholder="Optional guidance for follow-up suggested questions."
                         />
                       </div>
                       <div className="lp-action-row">

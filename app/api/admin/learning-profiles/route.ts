@@ -6,6 +6,7 @@ type LearningProfileRow = {
   name: string
   personality_summary: string | null
   llm_instructions_rich_text: string
+  suggestion_question_instructions_rich_text: string
   created_at: string
   updated_at: string
 }
@@ -46,7 +47,9 @@ export async function GET() {
     ] = await Promise.all([
       service
         .from('learning_profiles')
-        .select('id, name, personality_summary, llm_instructions_rich_text, created_at, updated_at')
+        .select(
+          'id, name, personality_summary, llm_instructions_rich_text, suggestion_question_instructions_rich_text, created_at, updated_at'
+        )
         .order('name', { ascending: true }),
       service.from('user_roles').select('user_id, email, role').order('email', { ascending: true }),
       service.from('user_learning_profiles').select('user_id, learning_profile_id, assigned_at'),
@@ -90,10 +93,12 @@ export async function POST(request: Request) {
       name?: string
       personalitySummary?: string
       llmInstructionsRichText?: string
+      suggestionQuestionInstructionsRichText?: string
     }
     const name = body.name?.trim()
     const personalitySummary = normalizeText(body.personalitySummary)
     const llmInstructionsRichText = body.llmInstructionsRichText?.trim() ?? ''
+    const suggestionQuestionInstructionsRichText = body.suggestionQuestionInstructionsRichText?.trim() ?? ''
 
     if (!name) {
       return NextResponse.json({ error: 'Provide a profile name.' }, { status: 400 })
@@ -108,6 +113,7 @@ export async function POST(request: Request) {
         name,
         personality_summary: personalitySummary,
         llm_instructions_rich_text: llmInstructionsRichText,
+        suggestion_question_instructions_rich_text: suggestionQuestionInstructionsRichText,
         created_by: user.id,
       })
       .select('id')
@@ -172,6 +178,10 @@ export async function PATCH(request: Request) {
     const personalitySummary = normalizeText(typeof body.personalitySummary === 'string' ? body.personalitySummary : null)
     const llmInstructionsRichText =
       typeof body.llmInstructionsRichText === 'string' ? body.llmInstructionsRichText.trim() : ''
+    const suggestionQuestionInstructionsRichText =
+      typeof body.suggestionQuestionInstructionsRichText === 'string'
+        ? body.suggestionQuestionInstructionsRichText.trim()
+        : ''
 
     if (!profileId) {
       return NextResponse.json({ error: 'Provide profileId.' }, { status: 400 })
@@ -189,6 +199,7 @@ export async function PATCH(request: Request) {
         name,
         personality_summary: personalitySummary,
         llm_instructions_rich_text: llmInstructionsRichText,
+        suggestion_question_instructions_rich_text: suggestionQuestionInstructionsRichText,
       })
       .eq('id', profileId)
     if (error) throw new Error(error.message)

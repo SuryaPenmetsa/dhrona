@@ -66,6 +66,27 @@ type TutorMessage = {
   content: string
 }
 
+type TopicResource = {
+  id: string
+  topic_title: string
+  topic_subject: string | null
+  resource_type: 'file' | 'url' | 'note'
+  label: string | null
+  url: string | null
+  file_name: string | null
+  note_content?: string | null
+  visibility?: 'own' | 'shared'
+  open_url: string | null
+  created_at: string
+}
+
+type ShareUser = {
+  userId: string | null
+  email: string
+  displayName: string
+  status?: 'registered' | 'you' | 'pending'
+}
+
 function conceptKey(name: string, subject: string | null) {
   return `${name}@@${subject ?? ''}`
 }
@@ -289,8 +310,9 @@ export default function DashboardPage() {
   const [tutorInput, setTutorInput] = useState('')
   const [tutorLoading, setTutorLoading] = useState(false)
   const [tutorError, setTutorError] = useState<string | null>(null)
-  const [isTutorOpen, setIsTutorOpen] = useState(false)
+  const [mapViewMode, setMapViewMode] = useState<'map' | 'tutor' | 'resources'>('map')
   const tutorChatScrollRef = useRef<HTMLDivElement | null>(null)
+  const tutorInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [mapNodePositions, setMapNodePositions] = useState<Record<string, { x: number; y: number }>>({})
   const mapSvgRef = useRef<SVGSVGElement | null>(null)
   const dragRef = useRef<{
@@ -303,11 +325,36 @@ export default function DashboardPage() {
     moved: boolean
   } | null>(null)
   const suppressClickNodeRef = useRef<string | null>(null)
+  const resourceFileInputRef = useRef<HTMLInputElement | null>(null)
+
+  const [topicResourcesByKey, setTopicResourcesByKey] = useState<Record<string, TopicResource[]>>({})
+  const [topicResourcesLoadingByKey, setTopicResourcesLoadingByKey] = useState<Record<string, boolean>>({})
+  const [resourceLabelDraft, setResourceLabelDraft] = useState('')
+  const [resourceUrlDraft, setResourceUrlDraft] = useState('')
+  const [resourceNoteDraft, setResourceNoteDraft] = useState('')
+  const [resourceActionLoading, setResourceActionLoading] = useState(false)
+  const [resourceError, setResourceError] = useState<string | null>(null)
+  const [resourceShareMenuId, setResourceShareMenuId] = useState<string | null>(null)
+  const [resourceShareTargetById, setResourceShareTargetById] = useState<Record<string, string>>({})
+  const [shareUsers, setShareUsers] = useState<ShareUser[]>([])
+  const [shareUsersLoading, setShareUsersLoading] = useState(false)
+  const [shareUsersLoaded, setShareUsersLoaded] = useState(false)
+  const [tutorShareEmail, setTutorShareEmail] = useState('')
+  const [resourceAddMode, setResourceAddMode] = useState<'file' | 'link' | 'note'>('file')
+  const sharePopoverRef = useRef<HTMLDivElement | null>(null)
 
   const activeMapTopic = useMemo(
     () => mapTabs.find(tab => tab.id === activeMapTabId) ?? null,
     [activeMapTabId, mapTabs]
   )
+  const activeTopicResourceKey = useMemo(
+    () => (activeMapTopic ? conceptKey(activeMapTopic.title, activeMapTopic.subject) : null),
+    [activeMapTopic]
+  )
+  const activeTopicResources =
+    activeTopicResourceKey && topicResourcesByKey[activeTopicResourceKey]
+      ? topicResourcesByKey[activeTopicResourceKey]
+      : []
   const selectedTutorNode = useMemo(() => {
     if (!selectedTutorNodeKey || !chainData) return null
     return chainData.nodes.find(node => node.key === selectedTutorNodeKey) ?? null
@@ -490,6 +537,52 @@ export default function DashboardPage() {
       cancelled = true
     }
   }, [activeMapTopic, selectedTutorNode, tutorLoadedThreads, tutorThreadKey])
+
+  useEffect(() => {
+    if (!resourceShareMenuId) return
+    function handleClickOutside(event: MouseEvent) {
+      if (sharePopoverRef.current && !sharePopoverRef.current.contains(event.target as Node)) {
+        setResourceShareMenuId(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [resourceShareMenuId])
+
+  useEffect(() => {
+    if (!activeMapTopic || !activeTopicResourceKey) return
+    let cancelled = false
+
+    async function loadTopicResources(topicTitle: string, topicSubject: string | null, key: string) {
+      setTopicResourcesLoadingByKey(prev => ({ ...prev, [key]: true }))
+      setResourceError(null)
+      try {
+        const params = new URLSearchParams({ topic_title: topicTitle })
+        if (topicSubject) params.set('topic_subject', topicSubject)
+        const res = await fetch(`/api/dashboard/topic-resources?${params.toString()}`)
+        const payload = (await res.json()) as { resources?: TopicResource[]; error?: string }
+        if (!res.ok) {
+          throw new Error(payload.error ?? `Failed to load topic resources (HTTP ${res.status})`)
+        }
+        if (cancelled) return
+        setTopicResourcesByKey(prev => ({
+          ...prev,
+          [key]: payload.resources ?? [],
+        }))
+      } catch (err) {
+        if (cancelled) return
+        setResourceError(err instanceof Error ? err.message : 'Could not load topic resources')
+      } finally {
+        if (cancelled) return
+        setTopicResourcesLoadingByKey(prev => ({ ...prev, [key]: false }))
+      }
+    }
+
+    void loadTopicResources(activeMapTopic.title, activeMapTopic.subject, activeTopicResourceKey)
+    return () => {
+      cancelled = true
+    }
+  }, [activeMapTopic, activeTopicResourceKey])
 
   const selectedDateRangeLabel =
     startDate && endDate
@@ -738,6 +831,7 @@ export default function DashboardPage() {
     })
     setActiveMapTabId(id)
     setActiveTab('map')
+    setMapViewMode('map')
     if (!pushHistory) return
 
     const base = topicHistoryIndex >= 0 ? topicHistory.slice(0, topicHistoryIndex + 1) : []
@@ -893,7 +987,231 @@ export default function DashboardPage() {
   function openTutorForNode(nodeKey: string) {
     setSelectedTutorNodeKey(nodeKey)
     setTutorError(null)
-    setIsTutorOpen(true)
+    setMapViewMode('tutor')
+  }
+
+  function applySuggestedPromptToInput(prompt: string) {
+    setTutorInput(prompt)
+    requestAnimationFrame(() => {
+      tutorInputRef.current?.focus()
+    })
+  }
+
+  async function uploadTopicFile(file: File) {
+    if (!activeMapTopic || !activeTopicResourceKey) return
+    setResourceActionLoading(true)
+    setResourceError(null)
+    try {
+      const form = new FormData()
+      form.append('topic_title', activeMapTopic.title)
+      if (activeMapTopic.subject) {
+        form.append('topic_subject', activeMapTopic.subject)
+      }
+      if (resourceLabelDraft.trim()) {
+        form.append('label', resourceLabelDraft.trim())
+      }
+      form.append('file', file)
+
+      const res = await fetch('/api/dashboard/topic-resources', {
+        method: 'POST',
+        body: form,
+      })
+      const payload = (await res.json()) as { resource?: TopicResource; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Upload failed (HTTP ${res.status})`)
+      }
+      if (!payload.resource) {
+        throw new Error('Upload succeeded but no resource was returned.')
+      }
+      setTopicResourcesByKey(prev => ({
+        ...prev,
+        [activeTopicResourceKey]: [payload.resource!, ...(prev[activeTopicResourceKey] ?? [])],
+      }))
+      setResourceLabelDraft('')
+      if (resourceFileInputRef.current) {
+        resourceFileInputRef.current.value = ''
+      }
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not upload file')
+    } finally {
+      setResourceActionLoading(false)
+    }
+  }
+
+  async function addTopicUrl() {
+    if (!activeMapTopic || !activeTopicResourceKey) return
+    const url = resourceUrlDraft.trim()
+    if (!url) return
+
+    setResourceActionLoading(true)
+    setResourceError(null)
+    try {
+      const res = await fetch('/api/dashboard/topic-resources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topicTitle: activeMapTopic.title,
+          topicSubject: activeMapTopic.subject,
+          label: resourceLabelDraft.trim() || null,
+          url,
+        }),
+      })
+      const payload = (await res.json()) as { resource?: TopicResource; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not add URL (HTTP ${res.status})`)
+      }
+      if (!payload.resource) {
+        throw new Error('URL added but no resource was returned.')
+      }
+      setTopicResourcesByKey(prev => ({
+        ...prev,
+        [activeTopicResourceKey]: [payload.resource!, ...(prev[activeTopicResourceKey] ?? [])],
+      }))
+      setResourceUrlDraft('')
+      setResourceLabelDraft('')
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not add URL')
+    } finally {
+      setResourceActionLoading(false)
+    }
+  }
+
+  async function addTopicNote() {
+    if (!activeMapTopic || !activeTopicResourceKey) return
+    const note = resourceNoteDraft.trim()
+    if (!note) return
+
+    setResourceActionLoading(true)
+    setResourceError(null)
+    try {
+      const res = await fetch('/api/dashboard/topic-resources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topicTitle: activeMapTopic.title,
+          topicSubject: activeMapTopic.subject,
+          label: resourceLabelDraft.trim() || null,
+          noteContent: note,
+        }),
+      })
+      const payload = (await res.json()) as { resource?: TopicResource; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not add note (HTTP ${res.status})`)
+      }
+      if (!payload.resource) {
+        throw new Error('Note added but no resource was returned.')
+      }
+      setTopicResourcesByKey(prev => ({
+        ...prev,
+        [activeTopicResourceKey]: [payload.resource!, ...(prev[activeTopicResourceKey] ?? [])],
+      }))
+      setResourceNoteDraft('')
+      setResourceLabelDraft('')
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not add note')
+    } finally {
+      setResourceActionLoading(false)
+    }
+  }
+
+  async function shareTopicResource(resourceId: string, directUserId?: string) {
+    const targetUserId = (directUserId ?? resourceShareTargetById[resourceId] ?? '').trim()
+    if (!targetUserId) return
+    setResourceActionLoading(true)
+    setResourceError(null)
+    try {
+      const res = await fetch('/api/dashboard/topic-resources/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resourceId,
+          targetUserId,
+        }),
+      })
+      const payload = (await res.json()) as { ok?: boolean; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not share resource (HTTP ${res.status})`)
+      }
+      setResourceShareTargetById(prev => ({ ...prev, [resourceId]: '' }))
+      setResourceShareMenuId(null)
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not share resource')
+    } finally {
+      setResourceActionLoading(false)
+    }
+  }
+
+  async function ensureShareUsersLoaded() {
+    if (shareUsersLoaded || shareUsersLoading) return
+    setShareUsersLoading(true)
+    try {
+      const res = await fetch('/api/dashboard/share-users')
+      const payload = (await res.json()) as { users?: ShareUser[]; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not load users (HTTP ${res.status})`)
+      }
+      setShareUsers(payload.users ?? [])
+      setShareUsersLoaded(true)
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not load users')
+    } finally {
+      setShareUsersLoading(false)
+    }
+  }
+
+  async function shareTutorEpisode() {
+    if (!tutorThreadKey) return
+    const episodeId = tutorEpisodeIds[tutorThreadKey]
+    if (!episodeId) {
+      setTutorError('Send at least one message first, then share this chat.')
+      return
+    }
+    const email = tutorShareEmail.trim()
+    if (!email) return
+
+    setTutorLoading(true)
+    setTutorError(null)
+    try {
+      const res = await fetch('/api/dashboard/tutor/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ episodeId, targetEmail: email }),
+      })
+      const payload = (await res.json()) as { ok?: boolean; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not share chat (HTTP ${res.status})`)
+      }
+      setTutorShareEmail('')
+    } catch (err) {
+      setTutorError(err instanceof Error ? err.message : 'Could not share chat')
+    } finally {
+      setTutorLoading(false)
+    }
+  }
+
+  async function removeTopicResource(resourceId: string) {
+    if (!activeTopicResourceKey) return
+    setResourceActionLoading(true)
+    setResourceError(null)
+    try {
+      const res = await fetch('/api/dashboard/topic-resources', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: resourceId }),
+      })
+      const payload = (await res.json()) as { ok?: boolean; error?: string }
+      if (!res.ok) {
+        throw new Error(payload.error ?? `Could not remove resource (HTTP ${res.status})`)
+      }
+      setTopicResourcesByKey(prev => ({
+        ...prev,
+        [activeTopicResourceKey]: (prev[activeTopicResourceKey] ?? []).filter(item => item.id !== resourceId),
+      }))
+    } catch (err) {
+      setResourceError(err instanceof Error ? err.message : 'Could not remove resource')
+    } finally {
+      setResourceActionLoading(false)
+    }
   }
 
   function renderHomeTab() {
@@ -1211,6 +1529,38 @@ export default function DashboardPage() {
             </div>
           ) : null}
 
+          {activeMapTopic ? (
+            <div className="dash-map-view-tabstrip" role="tablist" aria-label="Map study views">
+              <button
+                type="button"
+                className={`dash-map-view-tab ${mapViewMode === 'map' ? 'dash-map-view-tab-active' : ''}`}
+                role="tab"
+                aria-selected={mapViewMode === 'map'}
+                onClick={() => setMapViewMode('map')}
+              >
+                Explore map
+              </button>
+              <button
+                type="button"
+                className={`dash-map-view-tab ${mapViewMode === 'tutor' ? 'dash-map-view-tab-active' : ''}`}
+                role="tab"
+                aria-selected={mapViewMode === 'tutor'}
+                onClick={() => setMapViewMode('tutor')}
+              >
+                Ask Tutor
+              </button>
+              <button
+                type="button"
+                className={`dash-map-view-tab ${mapViewMode === 'resources' ? 'dash-map-view-tab-active' : ''}`}
+                role="tab"
+                aria-selected={mapViewMode === 'resources'}
+                onClick={() => setMapViewMode('resources')}
+              >
+                Resources
+              </button>
+            </div>
+          ) : null}
+
           {!activeMapTopic ? (
             <p className="lead" style={{ margin: 0 }}>
               Select a topic from the Home tab to open its chain map.
@@ -1229,169 +1579,158 @@ export default function DashboardPage() {
             </p>
           ) : (
             <>
-              <div className="dash-map-wrap">
-                <svg
-                  ref={mapSvgRef}
-                  className="dash-map-canvas"
-                  viewBox={`0 0 ${chainLayout?.width ?? 920} ${chainLayout?.height ?? 420}`}
-                  role="img"
-                  aria-label="Topic dependency map"
-                  onPointerMove={handleMapPointerMove}
-                  onPointerUp={handleMapPointerUp}
-                  onPointerCancel={handleMapPointerUp}
-                >
-                  <defs>
-                    <marker id="dash-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6f8fb8" />
-                    </marker>
-                  </defs>
-                  {edgeRenderData.map(item => {
-                    return (
-                      <g key={item.edge.id}>
-                        <path
-                          d={item.path}
-                          fill="none"
-                          stroke="#5f7390"
-                          strokeOpacity="0.55"
-                          strokeWidth="1.4"
-                          markerEnd="url(#dash-map-arrow)"
-                        />
-                      </g>
-                    )
-                  })}
-
-                  {chainLayout?.nodes.map(node => {
-                    const isFocus = node.kind === 'focus'
-                    const titleLines = wrapTextByWords(node.name, 30, 3)
-                    const subjectY = Math.min(MAP_NODE_HEIGHT - 10, 18 + titleLines.length * 12 + 7)
-                    const fill =
-                      node.kind === 'focus'
-                        ? '#25467a'
-                        : node.kind === 'upstream'
-                          ? '#22423b'
-                          : '#3e3447'
-                    const stroke =
-                      node.kind === 'focus'
-                        ? '#8db7ff'
-                        : node.kind === 'upstream'
-                          ? '#7ed7c4'
-                          : '#c89bf6'
-                    return (
-                      <g
-                        key={node.key}
-                        transform={`translate(${node.x - MAP_NODE_HALF_WIDTH}, ${node.y - MAP_NODE_HALF_HEIGHT})`}
-                        className={`dash-map-node ${selectedTutorNodeKey === node.key ? 'dash-map-node-active' : ''}`}
-                        onPointerDown={event => handleMapNodePointerDown(event, node)}
-                        onClick={() => {
-                          if (suppressClickNodeRef.current === node.key) {
-                            suppressClickNodeRef.current = null
-                            return
-                          }
-                          setSelectedTutorNodeKey(node.key)
-                          setTutorError(null)
-                        }}
-                      >
-                        <rect
-                          width={MAP_NODE_WIDTH}
-                          height={MAP_NODE_HEIGHT}
-                          rx="10"
-                          fill={fill}
-                          stroke={stroke}
-                          strokeWidth={isFocus ? 2 : 1.2}
-                        />
-                        <text x="10" y="18" fill="#e8edf5" fontSize="12" fontWeight="700">
-                          {titleLines.map((line, index) => (
-                            <tspan key={`${node.key}-title-${index}`} x="10" dy={index === 0 ? 0 : 12}>
-                              {line}
-                            </tspan>
-                          ))}
-                        </text>
-                        <text x="10" y={subjectY} fill="#a8b5c8" fontSize="10">
-                          {node.subject ?? 'Uncategorized'}
-                        </text>
-                        <g
-                          className="dash-map-node-chat-btn"
-                          transform={`translate(${MAP_NODE_WIDTH - 26}, 6)`}
-                          onPointerDown={event => {
-                            event.stopPropagation()
-                          }}
-                          onClick={event => {
-                            event.stopPropagation()
-                            openTutorForNode(node.key)
-                          }}
-                        >
-                          <rect x="0" y="0" width="18" height="18" rx="9" fill="#122138" stroke="#4f7fca" strokeWidth="1" />
+              {mapViewMode === 'map' ? (
+                <div className="dash-map-wrap">
+                  <svg
+                    ref={mapSvgRef}
+                    className="dash-map-canvas"
+                    viewBox={`0 0 ${chainLayout?.width ?? 920} ${chainLayout?.height ?? 420}`}
+                    role="img"
+                    aria-label="Topic dependency map"
+                    onPointerMove={handleMapPointerMove}
+                    onPointerUp={handleMapPointerUp}
+                    onPointerCancel={handleMapPointerUp}
+                  >
+                    <defs>
+                      <marker id="dash-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#6f8fb8" />
+                      </marker>
+                    </defs>
+                    {edgeRenderData.map(item => {
+                      return (
+                        <g key={item.edge.id}>
                           <path
-                            d="M5.5 5.8 h7 a1.3 1.3 0 0 1 1.3 1.3 v3.5 a1.3 1.3 0 0 1-1.3 1.3 h-3.8 l-2.2 1.9 v-1.9 h-1a1.3 1.3 0 0 1-1.3-1.3 V7.1 a1.3 1.3 0 0 1 1.3-1.3 z"
-                            fill="#a7ccff"
+                            d={item.path}
+                            fill="none"
+                            stroke="#5f7390"
+                            strokeOpacity="0.55"
+                            strokeWidth="1.4"
+                            markerEnd="url(#dash-map-arrow)"
                           />
                         </g>
-                      </g>
-                    )
-                  })}
+                      )
+                    })}
 
-                  {edgeRenderData.map(item => {
-                    return (
-                      <g key={`${item.edge.id}-label`} className="dash-map-edge-label">
-                        <rect
-                          x={item.labelX - item.labelWidth / 2}
-                          y={item.labelY - 10}
-                          width={item.labelWidth}
-                          height={18}
-                          rx="6"
-                          fill="#0e1624"
-                          fillOpacity="0.9"
-                          stroke="#31435e"
-                          strokeWidth="0.8"
-                        />
-                        <text
-                          x={item.labelX}
-                          y={item.labelY + 2}
-                          textAnchor="middle"
-                          fill="#c4d3ea"
-                          fontSize="10"
-                          fontWeight="600"
+                    {chainLayout?.nodes.map(node => {
+                      const isFocus = node.kind === 'focus'
+                      const titleLines = wrapTextByWords(node.name, 30, 3)
+                      const subjectY = Math.min(MAP_NODE_HEIGHT - 10, 18 + titleLines.length * 12 + 7)
+                      const fill =
+                        node.kind === 'focus'
+                          ? '#25467a'
+                          : node.kind === 'upstream'
+                            ? '#22423b'
+                            : '#3e3447'
+                      const stroke =
+                        node.kind === 'focus'
+                          ? '#8db7ff'
+                          : node.kind === 'upstream'
+                            ? '#7ed7c4'
+                            : '#c89bf6'
+                      return (
+                        <g
+                          key={node.key}
+                          transform={`translate(${node.x - MAP_NODE_HALF_WIDTH}, ${node.y - MAP_NODE_HALF_HEIGHT})`}
+                          className={`dash-map-node ${selectedTutorNodeKey === node.key ? 'dash-map-node-active' : ''}`}
+                          onPointerDown={event => handleMapNodePointerDown(event, node)}
+                          onClick={() => {
+                            if (suppressClickNodeRef.current === node.key) {
+                              suppressClickNodeRef.current = null
+                              return
+                            }
+                            setSelectedTutorNodeKey(node.key)
+                            setTutorError(null)
+                          }}
                         >
-                          {item.label}
-                        </text>
-                      </g>
-                    )
-                  })}
-                </svg>
-              </div>
-              <button
-                type="button"
-                className={`dash-tutor-fab ${isTutorOpen ? 'dash-tutor-fab-hidden' : ''}`}
-                onClick={() => {
-                  if (!selectedTutorNodeKey && chainData?.focusKey) {
-                    setSelectedTutorNodeKey(chainData.focusKey)
-                  }
-                  setIsTutorOpen(true)
-                }}
-              >
-                Tutor
-              </button>
+                          <rect
+                            width={MAP_NODE_WIDTH}
+                            height={MAP_NODE_HEIGHT}
+                            rx="10"
+                            fill={fill}
+                            stroke={stroke}
+                            strokeWidth={isFocus ? 2 : 1.2}
+                          />
+                          <text x="10" y="18" fill="#e8edf5" fontSize="12" fontWeight="700">
+                            {titleLines.map((line, index) => (
+                              <tspan key={`${node.key}-title-${index}`} x="10" dy={index === 0 ? 0 : 12}>
+                                {line}
+                              </tspan>
+                            ))}
+                          </text>
+                          <text x="10" y={subjectY} fill="#a8b5c8" fontSize="10">
+                            {node.subject ?? 'Uncategorized'}
+                          </text>
+                          <g
+                            className="dash-map-node-chat-btn"
+                            transform={`translate(${MAP_NODE_WIDTH - 26}, 6)`}
+                            onPointerDown={event => {
+                              event.stopPropagation()
+                            }}
+                            onClick={event => {
+                              event.stopPropagation()
+                              openTutorForNode(node.key)
+                            }}
+                          >
+                            <rect x="0" y="0" width="18" height="18" rx="9" fill="#122138" stroke="#4f7fca" strokeWidth="1" />
+                            <path
+                              d="M5.5 5.8 h7 a1.3 1.3 0 0 1 1.3 1.3 v3.5 a1.3 1.3 0 0 1-1.3 1.3 h-3.8 l-2.2 1.9 v-1.9 h-1a1.3 1.3 0 0 1-1.3-1.3 V7.1 a1.3 1.3 0 0 1 1.3-1.3 z"
+                              fill="#a7ccff"
+                            />
+                          </g>
+                        </g>
+                      )
+                    })}
 
-              {isTutorOpen ? (
-                <aside className="dash-tutor-panel dash-tutor-panel-floating">
+                    {edgeRenderData.map(item => {
+                      return (
+                        <g key={`${item.edge.id}-label`} className="dash-map-edge-label">
+                          <rect
+                            x={item.labelX - item.labelWidth / 2}
+                            y={item.labelY - 10}
+                            width={item.labelWidth}
+                            height={18}
+                            rx="6"
+                            fill="#0e1624"
+                            fillOpacity="0.9"
+                            stroke="#31435e"
+                            strokeWidth="0.8"
+                          />
+                          <text
+                            x={item.labelX}
+                            y={item.labelY + 2}
+                            textAnchor="middle"
+                            fill="#c4d3ea"
+                            fontSize="10"
+                            fontWeight="600"
+                          >
+                            {item.label}
+                          </text>
+                        </g>
+                      )
+                    })}
+                  </svg>
+                </div>
+              ) : mapViewMode === 'tutor' ? (
+                <section className="dash-tutor-tab">
+                  <aside className="dash-tutor-panel">
                   <div className="dash-tutor-head">
                     <div>
                       <h3>Tutor</h3>
-                      <p className="dash-tutor-subhead">Concept-aware guidance</p>
+                      <p className="dash-tutor-subhead">Ask questions and learn one step at a time.</p>
                     </div>
                     <div className="dash-tutor-head-actions">
                       <button
                         type="button"
                         className="dash-reset-btn dash-tutor-open-map-btn"
-                        onClick={() => setIsTutorOpen(false)}
+                        onClick={() => setMapViewMode('map')}
                       >
-                        Close
+                        Back to map
                       </button>
                     </div>
                   </div>
                   {!selectedTutorNode ? (
                     <p className="dash-long-range-note" style={{ margin: 0 }}>
-                      Click a node chat icon to open Tutor for that concept.
+                      Pick a node in Explore map and tap its chat icon to start tutoring for that concept.
                     </p>
                   ) : (
                     <>
@@ -1409,14 +1748,13 @@ export default function DashboardPage() {
 
                       <div className="dash-tutor-chat" ref={tutorChatScrollRef}>
                         {tutorMessages.length === 0 ? (
-                          <p className="dash-long-range-note" style={{ margin: 0 }}>
-                            Ask anything about this concept. Tutor will use the map relationships to guide you.
-                          </p>
+                          <div className="dash-tutor-empty-state">
+                            <p className="dash-long-range-note" style={{ margin: 0 }}>
+                              Ask anything about this concept. Tutor will use the map relationships to guide you.
+                            </p>
+                          </div>
                         ) : (
-                          tutorMessages.map((message, index) => {
-                            const isLastMessage = index === tutorMessages.length - 1
-                            const showFollowups =
-                              message.role === 'assistant' && isLastMessage && tutorQuickPrompts.length > 0
+                          tutorMessages.map(message => {
                             return (
                             <div
                               key={message.id}
@@ -1428,26 +1766,6 @@ export default function DashboardPage() {
                               >
                                 <strong>{message.role === 'assistant' ? 'Tutor' : 'You'}</strong>
                                 <p>{message.content}</p>
-                                {showFollowups ? (
-                                  <div className="dash-tutor-quick-actions-inline-wrap">
-                                    <p className="dash-tutor-followup-label">Try one of these next:</p>
-                                    <div className="dash-tutor-quick-actions dash-tutor-quick-actions-inline" aria-label="Follow-up suggestions">
-                                    {tutorQuickPrompts.map(prompt => (
-                                      <button
-                                        key={prompt}
-                                        type="button"
-                                        className="dash-tutor-quick-btn"
-                                        disabled={tutorLoading}
-                                        onClick={() => {
-                                          void sendTutorMessage(prompt)
-                                        }}
-                                      >
-                                        {prompt}
-                                      </button>
-                                    ))}
-                                    </div>
-                                  </div>
-                                ) : null}
                               </div>
                             </div>
                             )
@@ -1455,6 +1773,25 @@ export default function DashboardPage() {
                         )}
                         {tutorLoading ? <p className="dash-long-range-note">Tutor is thinking...</p> : null}
                       </div>
+
+                      {tutorQuickPrompts.length > 0 ? (
+                        <div className="dash-tutor-composer-suggestions">
+                          <p className="dash-tutor-followup-label">Suggested questions</p>
+                          <div className="dash-tutor-quick-actions dash-tutor-quick-actions-inline" aria-label="Suggested questions">
+                            {tutorQuickPrompts.map(prompt => (
+                              <button
+                                key={prompt}
+                                type="button"
+                                className="dash-tutor-quick-btn"
+                                disabled={tutorLoading}
+                                onClick={() => applySuggestedPromptToInput(prompt)}
+                              >
+                                {prompt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
 
                       <form
                         className="dash-tutor-input-row"
@@ -1464,6 +1801,7 @@ export default function DashboardPage() {
                         }}
                       >
                         <textarea
+                          ref={tutorInputRef}
                           value={tutorInput}
                           onChange={event => setTutorInput(event.target.value)}
                           onKeyDown={event => {
@@ -1476,12 +1814,13 @@ export default function DashboardPage() {
                           }}
                           placeholder={`Ask Tutor about ${selectedTutorNode.name}`}
                           disabled={tutorLoading}
-                          rows={2}
+                          rows={3}
                         />
                         <button type="submit" className="dash-reset-btn" disabled={tutorLoading || !tutorInput.trim()}>
                           Send
                         </button>
                       </form>
+                      <p className="dash-tutor-input-hint">Press Enter to send, Shift+Enter for a new line.</p>
                       <div className="dash-tutor-footer-actions">
                         <button
                           type="button"
@@ -1499,6 +1838,25 @@ export default function DashboardPage() {
                           Clear chat
                         </button>
                       </div>
+                      <div className="dash-topic-resource-share-row">
+                        <input
+                          type="email"
+                          placeholder="Share this chat with email"
+                          value={tutorShareEmail}
+                          onChange={event => setTutorShareEmail(event.target.value)}
+                          disabled={tutorLoading}
+                        />
+                        <button
+                          type="button"
+                          className="dash-reset-btn"
+                          onClick={() => {
+                            void shareTutorEpisode()
+                          }}
+                          disabled={tutorLoading || !tutorShareEmail.trim()}
+                        >
+                          Share chat
+                        </button>
+                      </div>
                       {tutorError ? (
                         <p className="err" style={{ margin: 0 }}>
                           {tutorError}
@@ -1506,8 +1864,266 @@ export default function DashboardPage() {
                       ) : null}
                     </>
                   )}
-                </aside>
-              ) : null}
+                  </aside>
+                </section>
+              ) : (
+                <section className="card dash-res">
+                  <header className="dash-res-header">
+                    <h3 className="dash-res-title">Resources</h3>
+                    <span className="dash-res-subtitle">for {activeMapTopic?.title}</span>
+                  </header>
+
+                  {/* ── Add resource: segmented picker ── */}
+                  <div className="dash-res-add">
+                    <div className="dash-res-segmented" role="radiogroup" aria-label="Resource type">
+                      {(['file', 'link', 'note'] as const).map(mode => (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="radio"
+                          aria-checked={resourceAddMode === mode}
+                          className={`dash-res-seg-btn ${resourceAddMode === mode ? 'dash-res-seg-active' : ''}`}
+                          onClick={() => setResourceAddMode(mode)}
+                        >
+                          <span className={`dash-res-type-icon dash-res-type-${mode}`}>
+                            {mode === 'file' ? '\u{1F4CE}' : mode === 'link' ? '\u{1F517}' : '\u{270F}\u{FE0F}'}
+                          </span>
+                          {mode === 'file' ? 'File' : mode === 'link' ? 'Link' : 'Note'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {resourceAddMode === 'file' && (
+                      <div className="dash-res-input-row">
+                        <input
+                          type="text"
+                          className="dash-res-label-input"
+                          placeholder="Label (optional)"
+                          value={resourceLabelDraft}
+                          onChange={event => setResourceLabelDraft(event.target.value)}
+                          disabled={resourceActionLoading}
+                        />
+                        <button
+                          type="button"
+                          className="dash-res-add-btn"
+                          onClick={() => resourceFileInputRef.current?.click()}
+                          disabled={resourceActionLoading}
+                        >
+                          Choose file
+                        </button>
+                        <input
+                          ref={resourceFileInputRef}
+                          type="file"
+                          className="dash-topic-resource-file-input"
+                          onChange={event => {
+                            const file = event.target.files?.[0]
+                            if (file) void uploadTopicFile(file)
+                          }}
+                          disabled={resourceActionLoading}
+                        />
+                      </div>
+                    )}
+
+                    {resourceAddMode === 'link' && (
+                      <div className="dash-res-input-row">
+                        <input
+                          type="text"
+                          className="dash-res-label-input"
+                          placeholder="Label (optional)"
+                          value={resourceLabelDraft}
+                          onChange={event => setResourceLabelDraft(event.target.value)}
+                          disabled={resourceActionLoading}
+                        />
+                        <input
+                          type="url"
+                          className="dash-res-url-input"
+                          placeholder="https://example.com/resource"
+                          value={resourceUrlDraft}
+                          onChange={event => setResourceUrlDraft(event.target.value)}
+                          disabled={resourceActionLoading}
+                        />
+                        <button
+                          type="button"
+                          className="dash-res-add-btn"
+                          onClick={() => void addTopicUrl()}
+                          disabled={resourceActionLoading || !resourceUrlDraft.trim()}
+                        >
+                          Add
+                        </button>
+                      </div>
+                    )}
+
+                    {resourceAddMode === 'note' && (
+                      <div className="dash-res-input-col">
+                        <input
+                          type="text"
+                          className="dash-res-label-input"
+                          placeholder="Label (optional)"
+                          value={resourceLabelDraft}
+                          onChange={event => setResourceLabelDraft(event.target.value)}
+                          disabled={resourceActionLoading}
+                        />
+                        <textarea
+                          className="dash-res-note-input"
+                          placeholder="Write your note..."
+                          value={resourceNoteDraft}
+                          onChange={event => setResourceNoteDraft(event.target.value)}
+                          rows={3}
+                          disabled={resourceActionLoading}
+                        />
+                        <button
+                          type="button"
+                          className="dash-res-add-btn dash-res-add-btn-end"
+                          onClick={() => void addTopicNote()}
+                          disabled={resourceActionLoading || !resourceNoteDraft.trim()}
+                        >
+                          Save note
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {resourceError ? (
+                    <p className="err" style={{ marginBottom: 0 }}>
+                      {resourceError}
+                    </p>
+                  ) : null}
+
+                  {/* ── Resource list ── */}
+                  {topicResourcesLoadingByKey[activeTopicResourceKey ?? ''] ? (
+                    <div className="dash-res-empty">Loading resources...</div>
+                  ) : activeTopicResources.length === 0 ? (
+                    <div className="dash-res-empty">
+                      <span className="dash-res-empty-icon">{'\u{1F4DA}'}</span>
+                      <p>No resources yet.</p>
+                      <p className="dash-res-empty-hint">Upload a file, save a link, or write a note to get started.</p>
+                    </div>
+                  ) : (
+                    <>
+                      {activeTopicResources.some(r => r.visibility !== 'shared') && (
+                        <div className="dash-res-group">
+                          <h4 className="dash-res-group-label">Your resources</h4>
+                          <div className="dash-res-list">
+                            {activeTopicResources.filter(r => r.visibility !== 'shared').map(resource => (
+                              <div key={resource.id} className="dash-res-card" style={{ position: 'relative' }}>
+                                <div className={`dash-res-card-badge dash-res-badge-${resource.resource_type}`}>
+                                  {resource.resource_type === 'file' ? '\u{1F4CE}' : resource.resource_type === 'url' ? '\u{1F517}' : '\u{1F4DD}'}
+                                </div>
+                                <div className="dash-res-card-body">
+                                  <div className="dash-res-card-title">{resource.label || resource.file_name || resource.url || 'Resource'}</div>
+                                  <div className="dash-res-card-meta">
+                                    {resource.resource_type === 'file' ? 'File' : resource.resource_type === 'url' ? 'Link' : 'Note'}
+                                    {' \u00B7 '}
+                                    {new Date(resource.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                  </div>
+                                  {resource.resource_type === 'note' && resource.note_content ? (
+                                    <p className="dash-res-card-note">{resource.note_content}</p>
+                                  ) : null}
+                                </div>
+                                <div className="dash-res-card-actions">
+                                  {resource.open_url ? (
+                                    <a href={resource.open_url} target="_blank" rel="noreferrer" className="dash-res-icon-btn" title="Open">
+                                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8A1.5 1.5 0 0 0 13 12.5V10m-3-8h4v4m0-4L7.5 8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                    </a>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="dash-res-icon-btn"
+                                    title="Share"
+                                    onClick={() => {
+                                      if (resourceShareMenuId === resource.id) {
+                                        setResourceShareMenuId(null)
+                                        return
+                                      }
+                                      setResourceShareMenuId(resource.id)
+                                      void ensureShareUsersLoaded()
+                                    }}
+                                    disabled={resourceActionLoading}
+                                  >
+                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="12" cy="3" r="2" stroke="currentColor" strokeWidth="1.3"/><circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.3"/><circle cx="12" cy="13" r="2" stroke="currentColor" strokeWidth="1.3"/><path d="M5.7 6.9 10.3 4.1M5.7 9.1l4.6 2.8" stroke="currentColor" strokeWidth="1.3"/></svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="dash-res-icon-btn dash-res-icon-btn-danger"
+                                    title="Remove"
+                                    onClick={() => void removeTopicResource(resource.id)}
+                                    disabled={resourceActionLoading}
+                                  >
+                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M5.3 4V2.7a1 1 0 0 1 1-1h3.4a1 1 0 0 1 1 1V4m1.6 0-.5 8.5a1.5 1.5 0 0 1-1.5 1.4H5.7a1.5 1.5 0 0 1-1.5-1.4L3.7 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                  </button>
+                                </div>
+
+                                {resourceShareMenuId === resource.id ? (
+                                  <div className="dash-res-share-popover" ref={sharePopoverRef}>
+                                    <div className="dash-res-share-popover-head">Share with</div>
+                                    {shareUsersLoading ? (
+                                      <div className="dash-res-share-popover-loading">Loading users...</div>
+                                    ) : (
+                                      <div className="dash-res-share-popover-list">
+                                        {shareUsers.filter(u => u.status !== 'you' && u.userId).map(user => (
+                                          <button
+                                            key={user.userId}
+                                            type="button"
+                                            className="dash-res-share-user-btn"
+                                            onClick={() => void shareTopicResource(resource.id, user.userId!)}
+                                            disabled={resourceActionLoading}
+                                          >
+                                            <span className="dash-res-share-avatar">{user.displayName.charAt(0).toUpperCase()}</span>
+                                            <span className="dash-res-share-user-info">
+                                              <span className="dash-res-share-user-name">{user.displayName}</span>
+                                              <span className="dash-res-share-user-email">{user.email}</span>
+                                            </span>
+                                          </button>
+                                        ))}
+                                        {shareUsers.filter(u => u.status !== 'you' && u.userId).length === 0 && (
+                                          <div className="dash-res-share-popover-loading">No users to share with</div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {activeTopicResources.some(r => r.visibility === 'shared') && (
+                        <div className="dash-res-group">
+                          <h4 className="dash-res-group-label">Shared with you</h4>
+                          <div className="dash-res-list">
+                            {activeTopicResources.filter(r => r.visibility === 'shared').map(resource => (
+                              <div key={resource.id} className="dash-res-card">
+                                <div className={`dash-res-card-badge dash-res-badge-${resource.resource_type}`}>
+                                  {resource.resource_type === 'file' ? '\u{1F4CE}' : resource.resource_type === 'url' ? '\u{1F517}' : '\u{1F4DD}'}
+                                </div>
+                                <div className="dash-res-card-body">
+                                  <div className="dash-res-card-title">{resource.label || resource.file_name || resource.url || 'Resource'}</div>
+                                  <div className="dash-res-card-meta">
+                                    {resource.resource_type === 'file' ? 'File' : resource.resource_type === 'url' ? 'Link' : 'Note'}
+                                    {' \u00B7 '}
+                                    {new Date(resource.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                                  </div>
+                                  {resource.resource_type === 'note' && resource.note_content ? (
+                                    <p className="dash-res-card-note">{resource.note_content}</p>
+                                  ) : null}
+                                </div>
+                                <div className="dash-res-card-actions">
+                                  {resource.open_url ? (
+                                    <a href={resource.open_url} target="_blank" rel="noreferrer" className="dash-res-icon-btn" title="Open">
+                                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8A1.5 1.5 0 0 0 13 12.5V10m-3-8h4v4m0-4L7.5 8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                    </a>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </section>
+              )}
             </>
           )}
         </section>

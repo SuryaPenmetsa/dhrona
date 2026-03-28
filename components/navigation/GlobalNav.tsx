@@ -12,6 +12,8 @@ type NavItem = {
   adminOnly?: boolean
 }
 
+type ThemeMode = 'light' | 'dark' | 'system'
+
 const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/' },
   { label: 'Study', href: '/tutor' },
@@ -20,9 +22,24 @@ const navItems: NavItem[] = [
   { label: 'Admin', href: '/admin', adminOnly: true },
 ]
 
+const THEME_STORAGE_KEY = 'drona-theme'
+
 function isActive(pathname: string, href: string) {
   if (href === '/') return pathname === '/' || pathname === '/dashboard'
   return pathname === href || pathname.startsWith(`${href}/`)
+}
+
+function resolveSystemTheme() {
+  if (typeof window === 'undefined') return 'dark'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function applyTheme(mode: ThemeMode) {
+  if (typeof document === 'undefined') return
+  const resolved = mode === 'system' ? resolveSystemTheme() : mode
+  const root = document.documentElement
+  root.setAttribute('data-theme', resolved)
+  root.setAttribute('data-theme-mode', mode)
 }
 
 export default function GlobalNav() {
@@ -31,6 +48,7 @@ export default function GlobalNav() {
   const [user, setUser] = useState<User | null>(null)
   const [userRole, setUserRole] = useState<'admin' | 'member' | null>(null)
   const [userName, setUserName] = useState<string | null>(null)
+  const [themeMode, setThemeMode] = useState<ThemeMode>('system')
   const [authLoading, setAuthLoading] = useState(true)
   const [signingOut, setSigningOut] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -100,6 +118,26 @@ export default function GlobalNav() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [])
 
+  useEffect(() => {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    const initialMode: ThemeMode =
+      stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system'
+    setThemeMode(initialMode)
+    applyTheme(initialMode)
+  }, [])
+
+  useEffect(() => {
+    applyTheme(themeMode)
+    localStorage.setItem(THEME_STORAGE_KEY, themeMode)
+    if (themeMode !== 'system') {
+      return
+    }
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const handleChange = () => applyTheme('system')
+    media.addEventListener('change', handleChange)
+    return () => media.removeEventListener('change', handleChange)
+  }, [themeMode])
+
   async function handleSignOut() {
     setSigningOut(true)
     await supabase.auth.signOut()
@@ -152,6 +190,36 @@ export default function GlobalNav() {
               {menuOpen ? (
                 <div className="global-nav-menu" role="menu">
                   <div className="global-nav-menu-email">{user.email}</div>
+                  <div className="global-nav-menu-section-title">Theme</div>
+                  <div className="global-nav-theme-options" role="group" aria-label="Theme mode">
+                    <button
+                      type="button"
+                      className={`global-nav-theme-option ${themeMode === 'light' ? 'global-nav-theme-option-active' : ''}`}
+                      onClick={() => setThemeMode('light')}
+                      role="menuitemradio"
+                      aria-checked={themeMode === 'light'}
+                    >
+                      Light
+                    </button>
+                    <button
+                      type="button"
+                      className={`global-nav-theme-option ${themeMode === 'dark' ? 'global-nav-theme-option-active' : ''}`}
+                      onClick={() => setThemeMode('dark')}
+                      role="menuitemradio"
+                      aria-checked={themeMode === 'dark'}
+                    >
+                      Dark
+                    </button>
+                    <button
+                      type="button"
+                      className={`global-nav-theme-option ${themeMode === 'system' ? 'global-nav-theme-option-active' : ''}`}
+                      onClick={() => setThemeMode('system')}
+                      role="menuitemradio"
+                      aria-checked={themeMode === 'system'}
+                    >
+                      System
+                    </button>
+                  </div>
                   <button
                     type="button"
                     className="global-nav-menu-item"
