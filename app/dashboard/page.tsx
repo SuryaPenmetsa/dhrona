@@ -283,6 +283,7 @@ export default function DashboardPage() {
   const [chainError, setChainError] = useState<string | null>(null)
   const [selectedTutorNodeKey, setSelectedTutorNodeKey] = useState<string | null>(null)
   const [tutorChats, setTutorChats] = useState<Record<string, TutorMessage[]>>({})
+  const [tutorSuggestedPrompts, setTutorSuggestedPrompts] = useState<Record<string, string[]>>({})
   const [tutorEpisodeIds, setTutorEpisodeIds] = useState<Record<string, string>>({})
   const [tutorLoadedThreads, setTutorLoadedThreads] = useState<Record<string, boolean>>({})
   const [tutorInput, setTutorInput] = useState('')
@@ -313,6 +314,17 @@ export default function DashboardPage() {
   }, [chainData, selectedTutorNodeKey])
   const tutorThreadKey = activeMapTabId && selectedTutorNodeKey ? `${activeMapTabId}::${selectedTutorNodeKey}` : null
   const tutorMessages = tutorThreadKey ? tutorChats[tutorThreadKey] ?? [] : []
+  const tutorQuickPrompts = useMemo(() => {
+    if (!selectedTutorNode) return [] as string[]
+    const fallback = [
+      `Explain ${selectedTutorNode.name} in simple terms`,
+      `Give me a real-world analogy for ${selectedTutorNode.name}`,
+      `Quiz me with 3 quick checks on ${selectedTutorNode.name}`,
+      `What should I learn before ${selectedTutorNode.name}?`,
+    ]
+    if (!tutorThreadKey) return fallback
+    return tutorSuggestedPrompts[tutorThreadKey] ?? fallback
+  }, [selectedTutorNode, tutorSuggestedPrompts, tutorThreadKey])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -439,6 +451,7 @@ export default function DashboardPage() {
         const payload = (await res.json()) as {
           episodeId: string | null
           messages: Array<{ id: string; role: 'user' | 'assistant'; content: string }>
+          suggestedPrompts?: string[]
         }
         if (cancelled) return
 
@@ -449,6 +462,10 @@ export default function DashboardPage() {
             role: message.role,
             content: message.content,
           })),
+        }))
+        setTutorSuggestedPrompts(prev => ({
+          ...prev,
+          [threadKey]: (payload.suggestedPrompts ?? []).filter(Boolean),
         }))
         if (payload.episodeId) {
           setTutorEpisodeIds(prev => ({
@@ -804,6 +821,7 @@ export default function DashboardPage() {
         }),
       })
       const payload = (await res.json()) as { answer?: string; error?: string; episodeId?: string | null }
+      const suggestedPrompts = (payload as { suggestedPrompts?: string[] }).suggestedPrompts ?? []
       if (!res.ok) {
         throw new Error(payload.error ?? `Tutor failed (HTTP ${res.status})`)
       }
@@ -823,6 +841,10 @@ export default function DashboardPage() {
           [tutorThreadKey]: payload.episodeId!,
         }))
       }
+      setTutorSuggestedPrompts(prev => ({
+        ...prev,
+        [tutorThreadKey]: suggestedPrompts.filter(Boolean),
+      }))
       setTutorLoadedThreads(prev => ({
         ...prev,
         [tutorThreadKey]: true,
@@ -859,6 +881,11 @@ export default function DashboardPage() {
       ...prev,
       [tutorThreadKey]: true,
     }))
+    setTutorSuggestedPrompts(prev => {
+      const next = { ...prev }
+      delete next[tutorThreadKey]
+      return next
+    })
     setTutorInput('')
     setTutorError(null)
   }
@@ -1380,47 +1407,17 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
-                      <div className="dash-tutor-quick-actions" aria-label="Quick prompts">
-                        {[
-                          `Explain ${selectedTutorNode.name} in simple terms`,
-                          `Give me a real-world analogy for ${selectedTutorNode.name}`,
-                          `Quiz me with 3 quick checks on ${selectedTutorNode.name}`,
-                          `What should I learn before ${selectedTutorNode.name}?`,
-                        ].map(prompt => (
-                          <button
-                            key={prompt}
-                            type="button"
-                            className="dash-tutor-quick-btn"
-                            disabled={tutorLoading}
-                            onClick={() => {
-                              void sendTutorMessage(prompt)
-                            }}
-                          >
-                            {prompt}
-                          </button>
-                        ))}
-                        {tutorContext.upstream.slice(0, 2).map(name => (
-                          <button
-                            key={`up-${name}`}
-                            type="button"
-                            className="dash-tutor-quick-btn dash-tutor-quick-btn-context"
-                            disabled={tutorLoading}
-                            onClick={() => {
-                              void sendTutorMessage(`Connect ${selectedTutorNode.name} with prerequisite ${name}`)
-                            }}
-                          >
-                            Link with prerequisite: {name}
-                          </button>
-                        ))}
-                      </div>
-
                       <div className="dash-tutor-chat" ref={tutorChatScrollRef}>
                         {tutorMessages.length === 0 ? (
                           <p className="dash-long-range-note" style={{ margin: 0 }}>
                             Ask anything about this concept. Tutor will use the map relationships to guide you.
                           </p>
                         ) : (
-                          tutorMessages.map(message => (
+                          tutorMessages.map((message, index) => {
+                            const isLastMessage = index === tutorMessages.length - 1
+                            const showFollowups =
+                              message.role === 'assistant' && isLastMessage && tutorQuickPrompts.length > 0
+                            return (
                             <div
                               key={message.id}
                               className={`dash-tutor-bubble-row ${message.role === 'assistant' ? 'dash-tutor-bubble-row-assistant' : 'dash-tutor-bubble-row-user'}`}
@@ -1431,9 +1428,30 @@ export default function DashboardPage() {
                               >
                                 <strong>{message.role === 'assistant' ? 'Tutor' : 'You'}</strong>
                                 <p>{message.content}</p>
+                                {showFollowups ? (
+                                  <div className="dash-tutor-quick-actions-inline-wrap">
+                                    <p className="dash-tutor-followup-label">Try one of these next:</p>
+                                    <div className="dash-tutor-quick-actions dash-tutor-quick-actions-inline" aria-label="Follow-up suggestions">
+                                    {tutorQuickPrompts.map(prompt => (
+                                      <button
+                                        key={prompt}
+                                        type="button"
+                                        className="dash-tutor-quick-btn"
+                                        disabled={tutorLoading}
+                                        onClick={() => {
+                                          void sendTutorMessage(prompt)
+                                        }}
+                                      >
+                                        {prompt}
+                                      </button>
+                                    ))}
+                                    </div>
+                                  </div>
+                                ) : null}
                               </div>
                             </div>
-                          ))
+                            )
+                          })
                         )}
                         {tutorLoading ? <p className="dash-long-range-note">Tutor is thinking...</p> : null}
                       </div>

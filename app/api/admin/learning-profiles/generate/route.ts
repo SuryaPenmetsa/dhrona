@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { AuthzError, requireAdmin } from '@/lib/auth/admin'
+import { getLlmSettingsWithServiceClient } from '@/lib/llm/settings'
 
 export async function POST(request: Request) {
   try {
@@ -24,9 +25,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing ANTHROPIC_API_KEY.' }, { status: 500 })
     }
 
+    const llmSettings = await getLlmSettingsWithServiceClient()
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: llmSettings.profileGenerationModelId,
       max_tokens: 900,
       system:
         'You create tutoring behavior instructions for another LLM. ' +

@@ -9,9 +9,11 @@ const adminItems = [
   { label: 'Graph', href: '/admin/graph' },
   { label: 'Access', href: '/admin/access' },
   { label: 'Learning Profiles', href: '/admin/learning-profiles' },
+  { label: 'LLM Settings', href: '/admin/llm-settings' },
 ]
 
 function isActive(pathname: string, href: string) {
+  if (href === '/admin') return pathname === href
   return pathname === href || pathname.startsWith(`${href}/`)
 }
 

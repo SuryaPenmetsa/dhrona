@@ -29,6 +29,9 @@ export default function AdminModulePage() {
           <div className="wtr-process-item">
             <span>5</span> Open <Link href="/admin/learning-profiles">Learning profiles</Link> and assign each kid an LLM profile.
           </div>
+          <div className="wtr-process-item">
+            <span>6</span> Open <Link href="/admin/llm-settings">LLM settings</Link> and choose models based on cost/quality.
+          </div>
         </div>
       </section>
 
@@ -46,6 +49,9 @@ export default function AdminModulePage() {
           </Link>
           <Link href="/admin/learning-profiles" className="wtr-menu-pill">
             Learning profiles
+          </Link>
+          <Link href="/admin/llm-settings" className="wtr-menu-pill">
+            LLM settings
           </Link>
         </div>
       </section>
