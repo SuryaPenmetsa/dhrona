@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/service'
+import { AuthzError, requireAdmin } from '@/lib/auth/admin'
 import {
   extractWtrGraph,
   fetchExistingConceptsForPrompt,
@@ -19,16 +19,13 @@ const ALLOWED = new Set([
 
 const MAX_BYTES = 12 * 1024 * 1024
 
-function checkAdmin(request: Request): boolean {
-  const secret = process.env.WTR_ADMIN_SECRET
-  if (!secret) return true
-  return request.headers.get('x-admin-secret') === secret
-}
-
 export async function POST(request: Request) {
   try {
     return await postWtrProcess(request)
   } catch (err) {
+    if (err instanceof AuthzError) {
+      return NextResponse.json({ error: err.message }, { status: err.status })
+    }
     const message = err instanceof Error ? err.message : String(err)
     console.error('[wtr/process] fatal (non-JSON-safe path):', err)
     return NextResponse.json(
@@ -43,9 +40,7 @@ export async function POST(request: Request) {
 }
 
 async function postWtrProcess(request: Request) {
-  if (!checkAdmin(request)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const { service } = await requireAdmin()
 
   if (!process.env.ANTHROPIC_API_KEY?.trim()) {
     return NextResponse.json(
@@ -95,9 +90,7 @@ async function postWtrProcess(request: Request) {
 
   const periodLabel = [periodType, label, schoolYear].filter(Boolean).join(' · ')
 
-  const supabase = createServiceClient()
-
-  const { data: uploadRow, error: insertErr } = await supabase
+  const { data: uploadRow, error: insertErr } = await service
     .from('wtr_uploads')
     .insert({
       filename: String(file.name),
@@ -123,7 +116,7 @@ async function postWtrProcess(request: Request) {
   const uploadId = uploadRow.id as string
 
   try {
-    const existing = await fetchExistingConceptsForPrompt(supabase, { limit: 500 })
+    const existing = await fetchExistingConceptsForPrompt(service, { limit: 500 })
     const base64 = buffer.toString('base64')
 
     const extraction = await extractWtrGraph({
@@ -135,7 +128,7 @@ async function postWtrProcess(request: Request) {
     })
 
     const { conceptRows, connectionRows, errors: saveErrors } = await saveWtrGraphToDatabase({
-      supabase,
+      supabase: service,
       extraction,
       wtrUploadId: uploadId,
       grade,
@@ -150,7 +143,7 @@ async function postWtrProcess(request: Request) {
       ...(hasPartialFailure ? { saveErrors } : {}),
     }
 
-    await supabase
+    await service
       .from('wtr_uploads')
       .update({
         status: hasPartialFailure ? 'failed' : 'completed',
@@ -168,7 +161,7 @@ async function postWtrProcess(request: Request) {
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    await supabase
+    await service
       .from('wtr_uploads')
       .update({
         status: 'failed',

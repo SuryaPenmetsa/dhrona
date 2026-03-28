@@ -1,19 +1,11 @@
 import { NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/service'
+import { AuthzError, requireAdmin } from '@/lib/auth/admin'
 
 export const runtime = 'nodejs'
 
-function checkAdmin(request: Request): boolean {
-  const secret = process.env.WTR_ADMIN_SECRET
-  if (!secret) return true
-  return request.headers.get('x-admin-secret') === secret
-}
-
 export async function DELETE(request: Request) {
   try {
-    if (!checkAdmin(request)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { service } = await requireAdmin()
 
     const body = await request.json()
     const ids: string[] = Array.isArray(body.ids) ? body.ids : body.id ? [body.id] : []
@@ -22,8 +14,7 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: 'Provide "id" or "ids" in body' }, { status: 400 })
     }
 
-    const supabase = createServiceClient()
-    const { error, count } = await supabase
+    const { error, count } = await service
       .from('concept_connections')
       .delete({ count: 'exact' })
       .in('id', ids)
@@ -34,6 +25,9 @@ export async function DELETE(request: Request) {
 
     return NextResponse.json({ ok: true, deleted: count })
   } catch (err) {
+    if (err instanceof AuthzError) {
+      return NextResponse.json({ error: err.message }, { status: err.status })
+    }
     const message = err instanceof Error ? err.message : String(err)
     return NextResponse.json({ error: message }, { status: 500 })
   }
@@ -41,9 +35,7 @@ export async function DELETE(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    if (!checkAdmin(request)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { service } = await requireAdmin()
 
     const body = await request.json()
     const { id, relationship } = body as { id?: string; relationship?: string }
@@ -52,8 +44,7 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: 'Provide "id" and "relationship" in body' }, { status: 400 })
     }
 
-    const supabase = createServiceClient()
-    const { error } = await supabase
+    const { error } = await service
       .from('concept_connections')
       .update({ relationship })
       .eq('id', id)
@@ -64,6 +55,9 @@ export async function PATCH(request: Request) {
 
     return NextResponse.json({ ok: true })
   } catch (err) {
+    if (err instanceof AuthzError) {
+      return NextResponse.json({ error: err.message }, { status: err.status })
+    }
     const message = err instanceof Error ? err.message : String(err)
     return NextResponse.json({ error: message }, { status: 500 })
   }

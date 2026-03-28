@@ -23,6 +23,7 @@ export async function GET(request: Request) {
   const startDate = searchParams.get('start_date')
   const endDate = searchParams.get('end_date')
   const subjectId = searchParams.get('subject_id')
+  const search = searchParams.get('search')?.trim() ?? ''
 
   try {
     const fallbackSlots = buildTopicSlots()
@@ -83,11 +84,37 @@ export async function GET(request: Request) {
     if (selectedSubjectName) {
       query = query.eq('subject', selectedSubjectName)
     }
+    if (search) {
+      query = query.ilike('concept_name', `%${search}%`)
+    }
 
     const { data: rows, error: rowsError } = await query
     if (rowsError) {
       throw new Error(rowsError.message)
     }
+
+    let weekQuery = supabase
+      .from('curriculum_schedule')
+      .select('week_start, week_end')
+      .order('week_start', { ascending: true })
+      .order('week_end', { ascending: true })
+    if (selectedSubjectName) {
+      weekQuery = weekQuery.eq('subject', selectedSubjectName)
+    }
+    const { data: weekRows, error: weeksError } = await weekQuery
+    if (weeksError) {
+      throw new Error(weeksError.message)
+    }
+    const weeks = Array.from(
+      new Map(
+        (weekRows ?? [])
+          .filter(
+            (row): row is { week_start: string; week_end: string } =>
+              Boolean(row.week_start) && Boolean(row.week_end)
+          )
+          .map(row => [`${row.week_start}|${row.week_end}`, row] as const)
+      ).values()
+    )
 
     const topicSlots: TopicSlot[] = ((rows ?? []) as ScheduleRow[]).map((row, index) => {
       const subjectSafe = row.subject ?? 'Unknown'
@@ -126,6 +153,7 @@ export async function GET(request: Request) {
       },
       subjects: visibleSubjects,
       allSubjects,
+      weeks,
       topicSlots,
     })
   } catch (error) {

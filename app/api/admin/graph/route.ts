@@ -1,17 +1,12 @@
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/service'
+import { AuthzError, requireAdmin } from '@/lib/auth/admin'
 import type { Concept, ConceptConnection } from '@/lib/graph/types'
 
 export const runtime = 'nodejs'
 const PAGE_SIZE = 1000
 
 type GraphSource = 'all' | 'curriculum' | 'student'
-
-function checkAdmin(request: Request): boolean {
-  const secret = process.env.WTR_ADMIN_SECRET
-  if (!secret) return true
-  return request.headers.get('x-admin-secret') === secret
-}
 
 function matchesSearch(value: string | null | undefined, search: string): boolean {
   if (!search) return true
@@ -102,9 +97,7 @@ async function fetchAllConnections(supabase: ReturnType<typeof createServiceClie
 
 export async function GET(request: Request) {
   try {
-    if (!checkAdmin(request)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    await requireAdmin()
 
     const url = new URL(request.url)
     const subject = url.searchParams.get('subject')?.trim() ?? ''
@@ -280,6 +273,9 @@ export async function GET(request: Request) {
       },
     })
   } catch (err) {
+    if (err instanceof AuthzError) {
+      return NextResponse.json({ error: err.message }, { status: err.status })
+    }
     const message = err instanceof Error ? err.message : String(err)
     return NextResponse.json({ error: message }, { status: 500 })
   }

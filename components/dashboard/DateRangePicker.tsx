@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 type DateRangeValue = {
-  startDate: string
-  endDate: string
+  startDate: string | null
+  endDate: string | null
 }
 
 type DateRangePickerProps = {
@@ -48,11 +48,12 @@ function addDays(isoDate: string, days: number) {
 }
 
 function formatLabel(isoDate: string) {
-  return new Date(`${isoDate}T00:00:00Z`).toLocaleDateString(undefined, {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    day: '2-digit',
     month: 'short',
-    day: 'numeric',
     year: 'numeric',
-  })
+  }).format(new Date(`${isoDate}T00:00:00Z`))
 }
 
 function buildCalendarCells(monthIsoDate: string) {
@@ -77,7 +78,7 @@ function buildCalendarCells(monthIsoDate: string) {
 export default function DateRangePicker({ value, minDate, maxDate, onChange }: DateRangePickerProps) {
   const pickerRef = useRef<HTMLDivElement | null>(null)
   const [open, setOpen] = useState(false)
-  const [anchorMonth, setAnchorMonth] = useState(monthStart(value.startDate))
+  const [anchorMonth, setAnchorMonth] = useState(monthStart(value.startDate ?? minDate))
   const [pendingStart, setPendingStart] = useState<string | null>(null)
   const currentYear = new Date().getUTCFullYear()
   const yearOptions = useMemo(() => {
@@ -91,8 +92,8 @@ export default function DateRangePicker({ value, minDate, maxDate, onChange }: D
   const secondMonth = useMemo(() => shiftMonth(anchorMonth, 1), [anchorMonth])
 
   useEffect(() => {
-    setAnchorMonth(monthStart(value.startDate))
-  }, [value.startDate])
+    setAnchorMonth(monthStart(value.startDate ?? minDate))
+  }, [minDate, value.startDate])
 
   useEffect(() => {
     function onOutsideClick(event: MouseEvent) {
@@ -192,9 +193,10 @@ export default function DateRangePicker({ value, minDate, maxDate, onChange }: D
             if (!isoDate) {
               return <span key={`${monthIsoDate}-empty-${index}`} className="dash-date-day-empty" />
             }
-            const inRange = isoDate >= value.startDate && isoDate <= value.endDate
-            const isStart = isoDate === value.startDate
-            const isEnd = isoDate === value.endDate
+            const hasRange = Boolean(value.startDate && value.endDate)
+            const inRange = hasRange && isoDate >= value.startDate! && isoDate <= value.endDate!
+            const isStart = hasRange && isoDate === value.startDate
+            const isEnd = hasRange && isoDate === value.endDate
 
             return (
               <button
@@ -217,7 +219,9 @@ export default function DateRangePicker({ value, minDate, maxDate, onChange }: D
       <button type="button" className="dash-date-trigger" onClick={() => setOpen(v => !v)}>
         <span className="dash-date-trigger-icon">📅</span>
         <span>
-          {formatLabel(value.startDate)} - {formatLabel(value.endDate)}
+          {value.startDate && value.endDate
+            ? `${formatLabel(value.startDate)} - ${formatLabel(value.endDate)}`
+            : 'Select date range'}
         </span>
       </button>
 
@@ -241,15 +245,17 @@ export default function DateRangePicker({ value, minDate, maxDate, onChange }: D
               className="dash-date-footer-btn"
               onClick={() => {
                 setPendingStart(null)
-                onChange({ startDate: minDate, endDate: maxDate })
+                onChange({ startDate: null, endDate: null })
               }}
             >
-              Full range
+              Clear
             </button>
             <button
               type="button"
               className="dash-date-footer-btn"
+              disabled={!value.startDate}
               onClick={() => {
+                if (!value.startDate) return
                 const thisWeekEnd = addDays(value.startDate, 6)
                 setPendingStart(null)
                 onChange({

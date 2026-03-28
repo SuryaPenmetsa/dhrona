@@ -43,7 +43,6 @@ async function readJsonBody(res: Response): Promise<unknown> {
 }
 
 export default function WtrAdminPage() {
-  const [adminSecret, setAdminSecret] = useState('')
   const [periodType, setPeriodType] = useState<Period>('weekly')
   const [grade, setGrade] = useState('Grade 6A')
   const [label, setLabel] = useState('')
@@ -58,22 +57,16 @@ export default function WtrAdminPage() {
   const completedUploads = uploads.filter(upload => upload.status === 'completed').length
   const latestSummary = latestUpload ? getSummary(latestUpload) : null
 
-  const headers = useCallback(() => {
-    const h: Record<string, string> = {}
-    if (adminSecret.trim()) h['x-admin-secret'] = adminSecret.trim()
-    return h
-  }, [adminSecret])
-
   const loadUploads = useCallback(async () => {
     try {
-      const res = await fetch('/api/admin/wtr', { headers: headers() })
+      const res = await fetch('/api/admin/wtr')
       const j = (await readJsonBody(res)) as { error?: string; uploads?: UploadRow[] }
       if (!res.ok) throw new Error(j.error || res.statusText)
       setUploads(j.uploads ?? [])
     } catch {
       /* ignore list errors on first paint */
     }
-  }, [headers])
+  }, [])
 
   useEffect(() => {
     void loadUploads()
@@ -99,7 +92,6 @@ export default function WtrAdminPage() {
 
       const res = await fetch('/api/admin/wtr/process', {
         method: 'POST',
-        headers: headers(),
         body,
       })
       const j = (await readJsonBody(res)) as {
@@ -150,8 +142,14 @@ export default function WtrAdminPage() {
           <Link href="/admin/graph" className="wtr-menu-pill">
             Graph explorer
           </Link>
+          <Link href="/admin/access" className="wtr-menu-pill">
+            Access
+          </Link>
         </div>
         <div className="wtr-menu-group">
+          <Link href="/admin" className="wtr-menu-link">
+            Admin
+          </Link>
           <Link href="/" className="wtr-menu-link">
             Home
           </Link>
@@ -263,17 +261,6 @@ export default function WtrAdminPage() {
                       onChange={e => setLabel(e.target.value)}
                     />
                   </div>
-                  <div>
-                    <label htmlFor="secret">Admin secret (optional)</label>
-                    <input
-                      id="secret"
-                      type="password"
-                      autoComplete="off"
-                      placeholder="Leave empty unless WTR_ADMIN_SECRET is set"
-                      value={adminSecret}
-                      onChange={e => setAdminSecret(e.target.value)}
-                    />
-                  </div>
                 </div>
               </div>
 
@@ -287,7 +274,6 @@ export default function WtrAdminPage() {
                     <code>NEXT_PUBLIC_SUPABASE_URL</code> and service role key set
                   </div>
                   <div className="wtr-help-line">Migration `003_wtr_curriculum.sql` applied</div>
-                  <div className="wtr-help-line">Use admin secret only if `WTR_ADMIN_SECRET` is configured</div>
                 </div>
 
                 <div className="wtr-help-box">

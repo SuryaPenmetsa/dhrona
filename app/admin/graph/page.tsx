@@ -416,7 +416,6 @@ function clampViewport(next: Viewport, layout: ForceGraphLayout): Viewport {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function GraphAdminPage() {
-  const [adminSecret, setAdminSecret] = useState('')
   const [subject, setSubject] = useState('')
   const [grade, setGrade] = useState('')
   const [search, setSearch] = useState('')
@@ -452,11 +451,6 @@ export default function GraphAdminPage() {
     moved: boolean
   } | null>(null)
 
-  const headers = useCallback((): Record<string, string> => {
-    const v = adminSecret.trim()
-    return v ? { 'x-admin-secret': v } : {}
-  }, [adminSecret])
-
   const loadGraph = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -472,7 +466,7 @@ export default function GraphAdminPage() {
         if (we) params.set('week_end', we)
       }
       const suffix = params.toString() ? `?${params}` : ''
-      const res = await fetch(`/api/admin/graph${suffix}`, { headers: headers() })
+      const res = await fetch(`/api/admin/graph${suffix}`)
       const text = await readText(res)
       const payload = JSON.parse(text) as GraphPayload & { error?: string }
       if (!res.ok) throw new Error(payload.error || res.statusText)
@@ -483,7 +477,7 @@ export default function GraphAdminPage() {
     } finally {
       setLoading(false)
     }
-  }, [grade, headers, search, source, subject, week])
+  }, [grade, search, source, subject, week])
 
   useEffect(() => { void loadGraph() }, [loadGraph])
 
@@ -492,26 +486,26 @@ export default function GraphAdminPage() {
     try {
       const res = await fetch('/api/admin/graph/connections', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', ...headers() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
       })
       if (!res.ok) { const d = await res.json(); alert(d.error || 'Delete failed'); return }
       setGraph(prev => prev ? { ...prev, connections: prev.connections.filter(c => c.id !== id), stats: { ...prev.stats, totalConnections: prev.stats.totalConnections - 1 } } : prev)
     } catch (err) { alert(err instanceof Error ? err.message : 'Delete failed') }
-  }, [headers])
+  }, [])
 
   const updateConnection = useCallback(async (id: string, relationship: string) => {
     try {
       const res = await fetch('/api/admin/graph/connections', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...headers() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, relationship }),
       })
       if (!res.ok) { const d = await res.json(); alert(d.error || 'Update failed'); return }
       setGraph(prev => prev ? { ...prev, connections: prev.connections.map(c => c.id === id ? { ...c, relationship } : c) } : prev)
       setEditingConnectionId(null)
     } catch (err) { alert(err instanceof Error ? err.message : 'Update failed') }
-  }, [headers])
+  }, [])
 
   const conceptRows = useMemo(() => graph ? rankConcepts(graph.concepts, graph.connections) : [], [graph])
 
@@ -691,12 +685,42 @@ export default function GraphAdminPage() {
     }
   }, [])
 
-  const handleSvgWheel = useCallback((event: React.WheelEvent<SVGSVGElement>) => {
-    if (!renderedLayout) return
-    event.preventDefault()
-    const anchor = pointerToSvg(event.clientX, event.clientY)
-    zoomViewport(event.deltaY < 0 ? 1.18 : 1 / 1.18, anchor)
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg || !renderedLayout) return
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const anchor = pointerToSvg(event.clientX, event.clientY)
+      zoomViewport(event.deltaY < 0 ? 1.18 : 1 / 1.18, anchor)
+    }
+
+    // We need a non-passive listener because wheel zoom intentionally cancels page scroll.
+    svg.addEventListener('wheel', handleWheel, { passive: false })
+    return () => {
+      svg.removeEventListener('wheel', handleWheel)
+    }
   }, [pointerToSvg, renderedLayout, zoomViewport])
+
+  const handleSvgKeyDown = useCallback((event: React.KeyboardEvent<SVGSVGElement>) => {
+    if (!renderedLayout) return
+
+    const key = event.key
+    if (key === '+' || key === '=' || key === 'NumpadAdd') {
+      event.preventDefault()
+      zoomViewport(1.3)
+      return
+    }
+    if (key === '-' || key === '_' || key === 'NumpadSubtract') {
+      event.preventDefault()
+      zoomViewport(1 / 1.3)
+      return
+    }
+    if (key === '0' || key === 'Numpad0') {
+      event.preventDefault()
+      fitViewToMap()
+    }
+  }, [fitViewToMap, renderedLayout, zoomViewport])
 
   const subjectCounts = useMemo(() => {
     if (!graph) return []
@@ -714,7 +738,9 @@ export default function GraphAdminPage() {
     <main className="graph-page">
       <div className="admin-nav">
         <Link href="/">Home</Link>
+        <Link href="/admin">Admin</Link>
         <Link href="/admin/wtr">WTR Upload</Link>
+        <Link href="/admin/access">Access</Link>
       </div>
 
       <h1>Knowledge graph explorer</h1>
@@ -724,10 +750,6 @@ export default function GraphAdminPage() {
 
       <div className="card">
         <div className="graph-controls">
-          <div>
-            <label htmlFor="secret">Admin secret (optional)</label>
-            <input id="secret" type="password" autoComplete="off" placeholder="Only needed if WTR_ADMIN_SECRET is set" value={adminSecret} onChange={e => setAdminSecret(e.target.value)} />
-          </div>
           <div>
             <label htmlFor="graph-subject">Subject</label>
             <select id="graph-subject" value={subject} onChange={e => setSubject(e.target.value)}>
@@ -828,11 +850,12 @@ export default function GraphAdminPage() {
                     viewBox={`${(viewport ?? fullViewport(renderedLayout)).x} ${(viewport ?? fullViewport(renderedLayout)).y} ${(viewport ?? fullViewport(renderedLayout)).width} ${(viewport ?? fullViewport(renderedLayout)).height}`}
                     role="img"
                     aria-label="Knowledge graph"
+                    tabIndex={0}
                     onPointerDown={handleSvgPointerDown}
                     onPointerMove={handleSvgPointerMove}
                     onPointerUp={handleSvgPointerUp}
                     onPointerCancel={handleSvgPointerUp}
-                    onWheel={handleSvgWheel}
+                    onKeyDown={handleSvgKeyDown}
                     style={{ background: '#0e1420', cursor: 'grab' }}
                   >
                     <defs>

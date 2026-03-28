@@ -1,9 +1,6 @@
-import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
 
-/**
- * Server-side Supabase client for user-scoped routes (anon key + optional user JWT).
- * For admin graph writes, use {@link createServiceClient} instead.
- */
 export async function createClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -12,5 +9,20 @@ export async function createClient() {
     throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY')
   }
 
-  return createSupabaseClient(url, key)
+  const cookieStore = await cookies()
+
+  return createServerClient(url, key, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll()
+      },
+      setAll(cookiesToSet) {
+        try {
+          cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options))
+        } catch {
+          // Setting cookies may throw in server components; middleware handles refresh in that case.
+        }
+      },
+    },
+  })
 }
