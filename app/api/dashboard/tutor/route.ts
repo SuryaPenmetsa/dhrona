@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createServiceClient } from '@/lib/supabase/service'
+import { createClient } from '@/lib/supabase/server'
 
 type TutorRole = 'user' | 'assistant'
 
@@ -40,6 +41,12 @@ type EpisodeRow = {
   node_subject: string | null
 }
 
+type LearningProfileRow = {
+  id: string
+  name: string
+  llm_instructions_rich_text: string
+}
+
 function fallbackTutorReply(payload: TutorRequest): string {
   const node = payload.node?.name?.trim() || payload.mapTopic?.title?.trim() || 'this concept'
   const subject = payload.node?.subject?.trim() || payload.mapTopic?.subject?.trim() || 'the current subject'
@@ -70,6 +77,41 @@ function normalizeNullableText(value: string | null | undefined) {
 
 function sameNullableText(a: string | null, b: string | null) {
   return (a ?? '') === (b ?? '')
+}
+
+async function resolveLearningProfileForCurrentUser() {
+  try {
+    const supabase = await createClient()
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) return null
+
+    const service = createServiceClient()
+    const { data: assignment, error: assignmentError } = await service
+      .from('user_learning_profiles')
+      .select('learning_profile_id')
+      .eq('user_id', user.id)
+      .maybeSingle()
+
+    if (assignmentError || !assignment?.learning_profile_id) {
+      return null
+    }
+
+    const { data: profile, error: profileError } = await service
+      .from('learning_profiles')
+      .select('id, name, llm_instructions_rich_text')
+      .eq('id', assignment.learning_profile_id)
+      .maybeSingle()
+
+    if (profileError || !profile?.llm_instructions_rich_text?.trim()) {
+      return null
+    }
+
+    return profile as LearningProfileRow
+  } catch {
+    return null
+  }
 }
 
 async function resolveEpisodeId({
@@ -234,6 +276,16 @@ export async function POST(request: Request) {
     let fallback = true
 
     if (process.env.ANTHROPIC_API_KEY) {
+      const learningProfile = await resolveLearningProfileForCurrentUser()
+      const systemInstruction =
+        'You are Tutor, an expert and friendly learning coach inside an educational concept map. ' +
+        'Give concise, clear explanations and guide the learner step by step. ' +
+        'Use plain language, short paragraphs, and include one quick check question at the end. ' +
+        'If relevant, connect to prerequisites and next concepts from the map context.' +
+        (learningProfile
+          ? `\n\nLearner profile (${learningProfile.name}) instructions:\n${learningProfile.llm_instructions_rich_text}`
+          : '')
+
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
       const history = (body.history ?? [])
         .filter(item => (item.role === 'user' || item.role === 'assistant') && item.content?.trim())
@@ -246,11 +298,7 @@ export async function POST(request: Request) {
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 700,
-        system:
-          'You are Tutor, an expert and friendly learning coach inside an educational concept map. ' +
-          'Give concise, clear explanations and guide the learner step by step. ' +
-          'Use plain language, short paragraphs, and include one quick check question at the end. ' +
-          'If relevant, connect to prerequisites and next concepts from the map context.',
+        system: systemInstruction,
         messages: [
           {
             role: 'user',

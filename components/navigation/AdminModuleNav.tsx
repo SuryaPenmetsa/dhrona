@@ -8,6 +8,7 @@ const adminItems = [
   { label: 'WTR Upload', href: '/admin/wtr' },
   { label: 'Graph', href: '/admin/graph' },
   { label: 'Access', href: '/admin/access' },
+  { label: 'Learning Profiles', href: '/admin/learning-profiles' },
 ]
 
 function isActive(pathname: string, href: string) {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import type { User } from '@supabase/supabase-js'
@@ -30,15 +30,23 @@ export default function GlobalNav() {
   const router = useRouter()
   const [user, setUser] = useState<User | null>(null)
   const [userRole, setUserRole] = useState<'admin' | 'member' | null>(null)
+  const [userName, setUserName] = useState<string | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [signingOut, setSigningOut] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
 
   const supabase = useMemo(() => createClient(), [])
 
-  async function loadRole(userId: string) {
-    const { data } = await supabase.from('user_roles').select('role').eq('user_id', userId).maybeSingle()
-    const role = data?.role === 'admin' ? 'admin' : 'member'
-    setUserRole(role)
+  async function loadUserContext(userId: string) {
+    const [{ data: roleData }, { data: profileData }] = await Promise.all([
+      supabase.from('user_roles').select('role').eq('user_id', userId).maybeSingle(),
+      supabase.from('user_profiles').select('first_name, last_name').eq('user_id', userId).maybeSingle(),
+    ])
+
+    setUserRole(roleData?.role === 'admin' ? 'admin' : 'member')
+    const fullName = [profileData?.first_name?.trim(), profileData?.last_name?.trim()].filter(Boolean).join(' ')
+    setUserName(fullName || null)
   }
 
   useEffect(() => {
@@ -51,9 +59,10 @@ export default function GlobalNav() {
       if (!mounted) return
       setUser(currentUser)
       if (currentUser) {
-        await loadRole(currentUser.id)
+        await loadUserContext(currentUser.id)
       } else {
         setUserRole(null)
+        setUserName(null)
       }
       setAuthLoading(false)
     }
@@ -66,9 +75,10 @@ export default function GlobalNav() {
       const nextUser = session?.user ?? null
       setUser(nextUser)
       if (nextUser) {
-        void loadRole(nextUser.id)
+        void loadUserContext(nextUser.id)
       } else {
         setUserRole(null)
+        setUserName(null)
       }
       setAuthLoading(false)
     })
@@ -79,11 +89,24 @@ export default function GlobalNav() {
     }
   }, [supabase])
 
+  useEffect(() => {
+    function onDocClick(event: MouseEvent) {
+      if (!menuRef.current) return
+      if (!menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [])
+
   async function handleSignOut() {
     setSigningOut(true)
     await supabase.auth.signOut()
     setUser(null)
     setUserRole(null)
+    setUserName(null)
+    setMenuOpen(false)
     setSigningOut(false)
     router.replace('/auth')
     router.refresh()
@@ -115,12 +138,32 @@ export default function GlobalNav() {
           {authLoading ? (
             <span className="global-nav-user">Checking session...</span>
           ) : user ? (
-            <>
-              <span className="global-nav-user">{user.email}</span>
-              <button type="button" className="global-nav-signout" onClick={handleSignOut} disabled={signingOut}>
-                {signingOut ? 'Signing out...' : 'Sign out'}
+            <div className="global-nav-menu-wrap" ref={menuRef}>
+              <button
+                type="button"
+                className="global-nav-menu-trigger"
+                onClick={() => setMenuOpen(prev => !prev)}
+                aria-expanded={menuOpen}
+                aria-haspopup="menu"
+              >
+                <span className="global-nav-menu-name">{userName ?? user.email ?? 'Account'}</span>
+                <span className="global-nav-menu-caret">▾</span>
               </button>
-            </>
+              {menuOpen ? (
+                <div className="global-nav-menu" role="menu">
+                  <div className="global-nav-menu-email">{user.email}</div>
+                  <button
+                    type="button"
+                    className="global-nav-menu-item"
+                    onClick={handleSignOut}
+                    disabled={signingOut}
+                    role="menuitem"
+                  >
+                    {signingOut ? 'Signing out...' : 'Sign out'}
+                  </button>
+                </div>
+              ) : null}
+            </div>
           ) : (
             <Link
               href="/auth"

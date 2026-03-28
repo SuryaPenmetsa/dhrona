@@ -26,6 +26,9 @@ export default function AdminModulePage() {
           <div className="wtr-process-item">
             <span>4</span> Remove pending invites once all family accounts are registered.
           </div>
+          <div className="wtr-process-item">
+            <span>5</span> Open <Link href="/admin/learning-profiles">Learning profiles</Link> and assign each kid an LLM profile.
+          </div>
         </div>
       </section>
 
@@ -40,6 +43,9 @@ export default function AdminModulePage() {
           </Link>
           <Link href="/admin/graph" className="wtr-menu-pill">
             Graph explorer
+          </Link>
+          <Link href="/admin/learning-profiles" className="wtr-menu-pill">
+            Learning profiles
           </Link>
         </div>
       </section>
