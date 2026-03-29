@@ -31,92 +31,84 @@ export async function GET(request: Request) {
 
     const supabase = createServiceClient()
 
-    const [
-      { data: allSubjectsRows, error: subjectError },
-      { data: minBoundRow, error: minBoundError },
-      { data: maxBoundRow, error: maxBoundError },
-    ] = await Promise.all([
-      supabase.from('curriculum_schedule').select('subject').order('subject'),
-      supabase
-        .from('curriculum_schedule')
-        .select('week_start')
-        .order('week_start', { ascending: true })
-        .limit(1)
-        .maybeSingle(),
-      supabase
-        .from('curriculum_schedule')
-        .select('week_end')
-        .order('week_end', { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-    ])
+    // Build the data query — if dates are provided, use them directly;
+    // otherwise omit date filters (equivalent to full range).
+    // This avoids a sequential metadata query just to get default bounds.
+    let query = supabase
+      .from('curriculum_schedule')
+      .select('id, concept_name, subject, week_start, week_end, schedule_type')
+      .order('week_start')
+      .order('concept_name')
 
-    if (subjectError || minBoundError || maxBoundError) {
-      const message = subjectError?.message ?? minBoundError?.message ?? maxBoundError?.message ?? 'Query failed'
-      throw new Error(message)
+    if (startDate && endDate) {
+      const orderedPair = startDate <= endDate ? [startDate, endDate] : [endDate, startDate]
+      query = query.lte('week_start', orderedPair[1]).gte('week_end', orderedPair[0])
+    } else if (startDate) {
+      query = query.gte('week_end', startDate)
+    } else if (endDate) {
+      query = query.lte('week_start', endDate)
     }
 
-    const dbMinDate = minBoundRow?.week_start ?? fallbackMinDate
-    const dbMaxDate = maxBoundRow?.week_end ?? fallbackMaxDate
+    // Resolve subject filter name from ID (build mapping from fallback data initially)
+    // We'll refine after we have actual subjects from the DB
+    let selectedSubjectName: string | null = null
+
+    let weekQuery = supabase
+      .from('curriculum_schedule')
+      .select('subject, week_start, week_end')
+      .order('week_start', { ascending: true })
+      .order('week_end', { ascending: true })
+
+    if (search) {
+      query = query.ilike('concept_name', `%${search}%`)
+    }
+
+    // Single parallel batch: data query + full metadata (subjects + week bounds)
+    const [{ data: rows, error: rowsError }, { data: metaWeekRows, error: metaWeeksError }] = await Promise.all([
+      query,
+      weekQuery,
+    ])
+    if (rowsError) throw new Error(rowsError.message)
+    if (metaWeeksError) throw new Error(metaWeeksError.message)
+
+    // Derive subjects and date bounds from metadata rows (replaces 3 separate queries)
+    let dbMinDate = fallbackMinDate
+    let dbMaxDate = fallbackMaxDate
+    const subjectSet = new Set<string>()
+    for (const row of metaWeekRows ?? []) {
+      if (row.subject) subjectSet.add(row.subject)
+      if (row.week_start && row.week_start < dbMinDate) dbMinDate = row.week_start
+      if (row.week_end && row.week_end > dbMaxDate) dbMaxDate = row.week_end
+    }
 
     const effectiveStart = startDate ?? dbMinDate
     const effectiveEnd = endDate ?? dbMaxDate
     const orderedStart = effectiveStart <= effectiveEnd ? effectiveStart : effectiveEnd
     const orderedEnd = effectiveStart <= effectiveEnd ? effectiveEnd : effectiveStart
 
-    const subjectNames = Array.from(
-      new Set((allSubjectsRows ?? []).map(row => row.subject).filter((v): v is string => Boolean(v)))
-    )
-
-    const allSubjects = buildSubjectsFromNames(subjectNames)
+    const allSubjects = buildSubjectsFromNames(Array.from(subjectSet).sort())
     const subjectNameById = new Map(allSubjects.map(subject => [subject.id, subject.name]))
-    const selectedSubjectName =
-      subjectId && subjectId !== 'all' ? subjectNameById.get(subjectId) ?? null : null
+    selectedSubjectName = subjectId && subjectId !== 'all' ? subjectNameById.get(subjectId) ?? null : null
 
-    let query = supabase
-      .from('curriculum_schedule')
-      .select('id, concept_name, subject, week_start, week_end, schedule_type')
-      .lte('week_start', orderedEnd)
-      .gte('week_end', orderedStart)
-      .order('week_start')
-      .order('concept_name')
-
-    if (selectedSubjectName) {
-      query = query.eq('subject', selectedSubjectName)
-    }
-    if (search) {
-      query = query.ilike('concept_name', `%${search}%`)
-    }
-
-    const { data: rows, error: rowsError } = await query
-    if (rowsError) {
-      throw new Error(rowsError.message)
-    }
-
-    let weekQuery = supabase
-      .from('curriculum_schedule')
-      .select('week_start, week_end')
-      .order('week_start', { ascending: true })
-      .order('week_end', { ascending: true })
-    if (selectedSubjectName) {
-      weekQuery = weekQuery.eq('subject', selectedSubjectName)
-    }
-    const { data: weekRows, error: weeksError } = await weekQuery
-    if (weeksError) {
-      throw new Error(weeksError.message)
-    }
+    // Deduplicate weeks, applying subject filter if selected
     const weeks = Array.from(
       new Map(
-        (weekRows ?? [])
+        (metaWeekRows ?? [])
           .filter(
-            (row): row is { week_start: string; week_end: string } =>
+            (row): row is { subject: string; week_start: string; week_end: string } =>
               Boolean(row.week_start) && Boolean(row.week_end)
           )
-          .map(row => [`${row.week_start}|${row.week_end}`, row] as const)
+          .filter(row => !selectedSubjectName || row.subject === selectedSubjectName)
+          .map(row => [`${row.week_start}|${row.week_end}`, { week_start: row.week_start, week_end: row.week_end }] as const)
       ).values()
     )
 
-    const topicSlots: TopicSlot[] = ((rows ?? []) as ScheduleRow[]).map((row, index) => {
+    // Apply subject filter in-memory on the already-fetched rows
+    const filteredRows = selectedSubjectName
+      ? ((rows ?? []) as ScheduleRow[]).filter(row => row.subject === selectedSubjectName)
+      : ((rows ?? []) as ScheduleRow[])
+
+    const topicSlots: TopicSlot[] = filteredRows.map((row, index) => {
       const subjectSafe = row.subject ?? 'Unknown'
       const startDay = weekdayIndexFromIso(row.week_start)
       const endDay = weekdayIndexFromIso(row.week_end)
@@ -155,6 +147,8 @@ export async function GET(request: Request) {
       allSubjects,
       weeks,
       topicSlots,
+    }, {
+      headers: { 'Cache-Control': 'private, max-age=60, stale-while-revalidate=120' },
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

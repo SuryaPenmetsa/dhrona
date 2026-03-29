@@ -4,7 +4,7 @@ import { AuthzError, requireAdmin } from '@/lib/auth/admin'
 import type { Concept, ConceptConnection } from '@/lib/graph/types'
 
 export const runtime = 'nodejs'
-const PAGE_SIZE = 1000
+const PAGE_SIZE = 5000
 
 type GraphSource = 'all' | 'curriculum' | 'student'
 
@@ -61,7 +61,7 @@ async function fetchAllConcepts(supabase: ReturnType<typeof createServiceClient>
     const to = from + PAGE_SIZE - 1
     const { data, error } = await supabase
       .from('concepts')
-      .select('*')
+      .select('id, name, subject, type, grade, created_at')
       .order('subject')
       .order('name')
       .order('id')
@@ -75,18 +75,29 @@ async function fetchAllConcepts(supabase: ReturnType<typeof createServiceClient>
   return rows
 }
 
-async function fetchAllConnections(supabase: ReturnType<typeof createServiceClient>) {
+async function fetchAllConnections(
+  supabase: ReturnType<typeof createServiceClient>,
+  filters: { subject: string; source: GraphSource }
+) {
   const rows: ConceptConnection[] = []
 
   for (let from = 0; ; from += PAGE_SIZE) {
     const to = from + PAGE_SIZE - 1
-    const { data, error } = await supabase
+    let query = supabase
       .from('concept_connections')
-      .select('*')
+      .select('id, child_key, concept_a, concept_b, subject_a, subject_b, relationship, created_at')
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .range(from, to)
 
+    if (filters.source === 'curriculum') query = query.eq('child_key', 'curriculum')
+    else if (filters.source === 'student') query = query.neq('child_key', 'curriculum')
+
+    if (filters.subject) {
+      query = query.or(`subject_a.eq.${filters.subject},subject_b.eq.${filters.subject}`)
+    }
+
+    const { data, error } = await query
     if (error) throw new Error(error.message)
     rows.push(...((data ?? []) as ConceptConnection[]))
     if (!data || data.length < PAGE_SIZE) break
@@ -97,8 +108,6 @@ async function fetchAllConnections(supabase: ReturnType<typeof createServiceClie
 
 export async function GET(request: Request) {
   try {
-    await requireAdmin()
-
     const url = new URL(request.url)
     const subject = url.searchParams.get('subject')?.trim() ?? ''
     const grade = url.searchParams.get('grade')?.trim() ?? ''
@@ -110,16 +119,14 @@ export async function GET(request: Request) {
 
     const supabase = createServiceClient()
 
-    const [allConcepts, allConnections, { data: allSchedule }, { data: weekOptions }] = await Promise.all([
+    // Run auth check in parallel with data loading (auth doesn't gate the service client)
+    const [, allConcepts, allConnections, { data: allSchedule }] = await Promise.all([
+      requireAdmin(),
       fetchAllConcepts(supabase),
-      fetchAllConnections(supabase),
+      fetchAllConnections(supabase, { subject, source }),
       supabase
         .from('curriculum_schedule')
         .select('concept_name, subject, week_start, week_end, schedule_type')
-        .order('week_start'),
-      supabase
-        .from('curriculum_schedule')
-        .select('week_start, week_end')
         .order('week_start'),
     ])
 
@@ -149,15 +156,16 @@ export async function GET(request: Request) {
       }
     }
 
-    // Deduplicate week options
+    // Deduplicate week options from the schedule data (no extra query needed)
     const seenWeeks = new Set<string>()
-    const weeks = (weekOptions ?? [])
+    const weeks = schedule
       .filter(w => {
         const k = `${w.week_start}|${w.week_end}`
         if (seenWeeks.has(k)) return false
         seenWeeks.add(k)
         return true
       })
+      .map(w => ({ week_start: w.week_start, week_end: w.week_end }))
 
     const filteredConnections = allConnections
       .filter(connection => connectionVisible(connection, { subject, search, source }))
@@ -226,6 +234,7 @@ export async function GET(request: Request) {
         return allowedConceptKeys.has(aKey) && allowedConceptKeys.has(bKey)
       })
 
+    // Derive filter options from concepts already loaded (no extra queries)
     const subjects = Array.from(
       new Set(
         allConcepts

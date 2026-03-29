@@ -50,39 +50,35 @@ export async function GET(request: Request) {
     }
 
     const supabase = createServiceClient()
+
+    // Single query for all curriculum connections — avoids multiple sequential
+    // round-trips to Seoul DB (each adding ~100-150ms network latency).
+    // BFS traversal runs in-memory which is sub-millisecond.
     const { data, error } = await supabase
       .from('concept_connections')
       .select('id, concept_a, concept_b, subject_a, subject_b, relationship')
       .eq('child_key', 'curriculum')
 
-    if (error) {
-      throw new Error(error.message)
-    }
+    if (error) throw new Error(error.message)
 
     const rows = (data ?? []) as ConnectionRow[]
-
     const outgoing = new Map<string, ChainEdge[]>()
     const incoming = new Map<string, ChainEdge[]>()
     const allNodeKeys = new Set<string>()
     const allEdges: ChainEdge[] = []
 
-    rows.forEach(row => {
+    for (const row of rows) {
       const fromKey = conceptKey(row.concept_a, row.subject_a)
       const toKey = conceptKey(row.concept_b, row.subject_b)
-      const edge: ChainEdge = {
-        id: row.id,
-        fromKey,
-        toKey,
-        relationship: row.relationship,
-      }
+      const edge: ChainEdge = { id: row.id, fromKey, toKey, relationship: row.relationship }
       allEdges.push(edge)
       allNodeKeys.add(fromKey)
       allNodeKeys.add(toKey)
       if (!outgoing.has(fromKey)) outgoing.set(fromKey, [])
       if (!incoming.has(toKey)) incoming.set(toKey, [])
-      outgoing.get(fromKey)?.push(edge)
-      incoming.get(toKey)?.push(edge)
-    })
+      outgoing.get(fromKey)!.push(edge)
+      incoming.get(toKey)!.push(edge)
+    }
 
     const topicMatches = Array.from(allNodeKeys).filter(key => {
       const parsed = parseKey(key)
@@ -92,49 +88,42 @@ export async function GET(request: Request) {
     })
 
     const focusKey = topicMatches[0] ?? conceptKey(topic, subject)
-
     const maxDepth = 3
     const included = new Set<string>([focusKey])
     const depthByKey = new Map<string, number>([[focusKey, 0]])
 
     const backwardQueue = [{ key: focusKey, depth: 0 }]
     while (backwardQueue.length) {
-      const current = backwardQueue.shift()
-      if (!current) break
+      const current = backwardQueue.shift()!
       if (Math.abs(current.depth) >= maxDepth) continue
-      const edges = incoming.get(current.key) ?? []
-      edges.forEach(edge => {
-        const parent = edge.fromKey
+      for (const edge of incoming.get(current.key) ?? []) {
         const nextDepth = current.depth - 1
-        const prevDepth = depthByKey.get(parent)
+        const prevDepth = depthByKey.get(edge.fromKey)
         if (prevDepth === undefined || Math.abs(nextDepth) < Math.abs(prevDepth)) {
-          depthByKey.set(parent, nextDepth)
+          depthByKey.set(edge.fromKey, nextDepth)
         }
-        if (!included.has(parent)) {
-          included.add(parent)
-          backwardQueue.push({ key: parent, depth: nextDepth })
+        if (!included.has(edge.fromKey)) {
+          included.add(edge.fromKey)
+          backwardQueue.push({ key: edge.fromKey, depth: nextDepth })
         }
-      })
+      }
     }
 
     const forwardQueue = [{ key: focusKey, depth: 0 }]
     while (forwardQueue.length) {
-      const current = forwardQueue.shift()
-      if (!current) break
+      const current = forwardQueue.shift()!
       if (Math.abs(current.depth) >= maxDepth) continue
-      const edges = outgoing.get(current.key) ?? []
-      edges.forEach(edge => {
-        const child = edge.toKey
+      for (const edge of outgoing.get(current.key) ?? []) {
         const nextDepth = current.depth + 1
-        const prevDepth = depthByKey.get(child)
+        const prevDepth = depthByKey.get(edge.toKey)
         if (prevDepth === undefined || Math.abs(nextDepth) < Math.abs(prevDepth)) {
-          depthByKey.set(child, nextDepth)
+          depthByKey.set(edge.toKey, nextDepth)
         }
-        if (!included.has(child)) {
-          included.add(child)
-          forwardQueue.push({ key: child, depth: nextDepth })
+        if (!included.has(edge.toKey)) {
+          included.add(edge.toKey)
+          forwardQueue.push({ key: edge.toKey, depth: nextDepth })
         }
-      })
+      }
     }
 
     const nodes: ChainNode[] = Array.from(included).map(key => {
@@ -157,6 +146,8 @@ export async function GET(request: Request) {
       focusKey,
       nodes,
       edges,
+    }, {
+      headers: { 'Cache-Control': 'private, max-age=120, stale-while-revalidate=300' },
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

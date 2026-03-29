@@ -53,10 +53,14 @@ export default function GlobalNav() {
   const [signingOut, setSigningOut] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const loadedUserIdRef = useRef<string | null>(null)
 
   const supabase = useMemo(() => createClient(), [])
 
-  async function loadUserContext(userId: string) {
+  async function loadUserContext(userId: string, force = false) {
+    if (!force && loadedUserIdRef.current === userId) return
+    loadedUserIdRef.current = userId
+
     const [{ data: roleData }, { data: profileData }] = await Promise.all([
       supabase.from('user_roles').select('role').eq('user_id', userId).maybeSingle(),
       supabase.from('user_profiles').select('first_name, last_name').eq('user_id', userId).maybeSingle(),
@@ -91,10 +95,14 @@ export default function GlobalNav() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       const nextUser = session?.user ?? null
+      const prevUser = loadedUserIdRef.current
       setUser(nextUser)
       if (nextUser) {
-        void loadUserContext(nextUser.id)
+        if (nextUser.id !== prevUser) {
+          void loadUserContext(nextUser.id)
+        }
       } else {
+        loadedUserIdRef.current = null
         setUserRole(null)
         setUserName(null)
       }

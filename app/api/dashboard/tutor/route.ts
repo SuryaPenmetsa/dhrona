@@ -205,38 +205,29 @@ function sameNullableText(a: string | null, b: string | null) {
   return (a ?? '') === (b ?? '')
 }
 
-async function resolveLearningProfileForCurrentUser() {
+async function resolveLearningProfileForUser(userId: string) {
   try {
-    const supabase = await createClient()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return null
-
     const service = createServiceClient()
     const { data: assignment, error: assignmentError } = await service
       .from('user_learning_profiles')
-      .select('learning_profile_id')
-      .eq('user_id', user.id)
+      .select('learning_profile_id, learning_profiles(id, name, llm_instructions_rich_text, suggestion_question_instructions_rich_text)')
+      .eq('user_id', userId)
       .maybeSingle()
 
     if (assignmentError || !assignment?.learning_profile_id) {
       return null
     }
 
-    const { data: profile, error: profileError } = await service
-      .from('learning_profiles')
-      .select('id, name, llm_instructions_rich_text, suggestion_question_instructions_rich_text')
-      .eq('id', assignment.learning_profile_id)
-      .maybeSingle()
+    const profile = (assignment as Record<string, unknown>).learning_profiles as LearningProfileRow | null
+    if (!profile) return null
 
-    const hasTutorInstructions = Boolean(profile?.llm_instructions_rich_text?.trim())
-    const hasSuggestionInstructions = Boolean(profile?.suggestion_question_instructions_rich_text?.trim())
-    if (profileError || !profile || (!hasTutorInstructions && !hasSuggestionInstructions)) {
+    const hasTutorInstructions = Boolean(profile.llm_instructions_rich_text?.trim())
+    const hasSuggestionInstructions = Boolean(profile.suggestion_question_instructions_rich_text?.trim())
+    if (!hasTutorInstructions && !hasSuggestionInstructions) {
       return null
     }
 
-    return profile as LearningProfileRow
+    return profile
   } catch (err) {
     console.error('[tutor] failed to resolve learning profile:', err)
     return null
@@ -320,53 +311,69 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Missing map_topic or node_name' }, { status: 400 })
     }
 
-    const learningProfile = await resolveLearningProfileForCurrentUser()
+    const supabase = createServiceClient()
+
+    // Run learning profile resolution and episode queries in parallel
+    const [learningProfile, { data: ownEpisodes, error: ownError }, { data: sharedEpisodeRows, error: sharedError }] =
+      await Promise.all([
+        resolveLearningProfileForUser(user.id),
+        supabase
+          .from('tutor_chat_episodes')
+          .select('id, owner_user_id, child_key, map_topic, map_subject, node_name, node_subject')
+          .eq('owner_user_id', user.id)
+          .eq('child_key', 'curriculum')
+          .eq('map_topic', mapTopic)
+          .eq('node_name', nodeName)
+          .limit(10),
+        supabase
+          .from('tutor_episode_shares')
+          .select('episode_id, tutor_chat_episodes(id, owner_user_id, child_key, map_topic, map_subject, node_name, node_subject)')
+          .eq('shared_with_user_id', user.id)
+          .limit(20),
+      ])
+
     const learningProfileApplied = Boolean(learningProfile?.llm_instructions_rich_text?.trim())
 
-    const supabase = createServiceClient()
-    const { data: episodes, error: episodeError } = await supabase
-      .from('tutor_chat_episodes')
-      .select('id, owner_user_id, child_key, map_topic, map_subject, node_name, node_subject')
-      .eq('child_key', 'curriculum')
-      .eq('map_topic', mapTopic)
-      .eq('node_name', nodeName)
-      .limit(30)
+    if (ownError) throw new Error(ownError.message)
+    if (sharedError) throw new Error(sharedError.message)
 
-    if (episodeError) {
-      throw new Error(episodeError.message)
+    const ownCandidates = (ownEpisodes ?? []) as EpisodeRow[]
+    const sharedCandidates = ((sharedEpisodeRows ?? []) as Array<Record<string, unknown>>)
+      .map(row => {
+        const ep = row.tutor_chat_episodes
+        if (!ep || typeof ep !== 'object') return null
+        return ep as EpisodeRow
+      })
+      .filter((ep): ep is EpisodeRow =>
+        ep !== null &&
+        ep.child_key === 'curriculum' &&
+        ep.map_topic === mapTopic &&
+        ep.node_name === nodeName
+      )
+
+    const seen = new Set<string>()
+    const visibleCandidates: EpisodeRow[] = []
+    for (const ep of [...ownCandidates, ...sharedCandidates]) {
+      if (!seen.has(ep.id)) {
+        seen.add(ep.id)
+        visibleCandidates.push(ep)
+      }
     }
-
-    const allCandidates = (episodes ?? []) as EpisodeRow[]
-    const sharedEpisodeIds = allCandidates.map(item => item.id)
-    let sharedWithMe = new Set<string>()
-    if (sharedEpisodeIds.length > 0) {
-      const { data: shareRows } = await supabase
-        .from('tutor_episode_shares')
-        .select('episode_id')
-        .in('episode_id', sharedEpisodeIds)
-        .eq('shared_with_user_id', user.id)
-      sharedWithMe = new Set((shareRows ?? []).map(row => (row as { episode_id: string }).episode_id))
-    }
-
-    const visibleCandidates = allCandidates.filter(
-      item => item.owner_user_id === user.id || sharedWithMe.has(item.id)
-    )
 
     const episode = visibleCandidates.find(
       item => sameNullableText(item.map_subject, mapSubject) && sameNullableText(item.node_subject, nodeSubject)
     )
 
     if (!episode) {
-      const suggestedPrompts = await generateSuggestedPrompts({
-        nodeName,
-        learningProfile,
-        upstream: [],
-        downstream: [],
-      })
       return NextResponse.json({
         episodeId: null,
         messages: [],
-        suggestedPrompts,
+        suggestedPrompts: buildSuggestedPrompts({
+          nodeName,
+          learningProfile,
+          upstream: [],
+          downstream: [],
+        }),
         learningProfileApplied,
         learningProfileName: learningProfile?.name ?? null,
       })
@@ -385,21 +392,11 @@ export async function GET(request: Request) {
     return NextResponse.json({
       episodeId: episode.id,
       messages: (messages ?? []) as PersistedMessageRow[],
-      suggestedPrompts: await generateSuggestedPrompts({
+      suggestedPrompts: buildSuggestedPrompts({
         nodeName,
         learningProfile,
         upstream: [],
         downstream: [],
-        recentQuestion:
-          [...((messages ?? []) as PersistedMessageRow[])]
-            .reverse()
-            .find(message => message.role === 'user')
-            ?.content ?? undefined,
-        recentAnswer:
-          [...((messages ?? []) as PersistedMessageRow[])]
-            .reverse()
-            .find(message => message.role === 'assistant')
-            ?.content ?? undefined,
       }),
       learningProfileApplied,
       learningProfileName: learningProfile?.name ?? null,
@@ -499,7 +496,7 @@ export async function POST(request: Request) {
     let answer = fallbackAnswer
     let fallback = true
 
-    const learningProfile = await resolveLearningProfileForCurrentUser()
+    const learningProfile = await resolveLearningProfileForUser(user.id)
     const learningProfileApplied = Boolean(learningProfile?.llm_instructions_rich_text?.trim())
 
     if (process.env.ANTHROPIC_API_KEY) {

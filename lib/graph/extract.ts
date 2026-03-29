@@ -142,17 +142,16 @@ ${transcript}`,
   }
 
   if (extraction.gaps_resolved.length > 0) {
-    for (const resolved of extraction.gaps_resolved) {
-      const { error } = await supabase
-        .from('learning_gaps')
-        .update({ status: 'resolved', resolved_at: new Date().toISOString() })
-        .eq('child_key', childKey)
-        .eq('concept', resolved.concept)
-        .eq('status', 'open')
-      if (error) {
-        console.error('[graph/extract] gap resolve error:', error)
-        errors.push(`gap_resolve(${resolved.concept}): ${error.message}`)
-      }
+    const resolvedConcepts = extraction.gaps_resolved.map(g => g.concept)
+    const { error } = await supabase
+      .from('learning_gaps')
+      .update({ status: 'resolved', resolved_at: new Date().toISOString() })
+      .eq('child_key', childKey)
+      .in('concept', resolvedConcepts)
+      .eq('status', 'open')
+    if (error) {
+      console.error('[graph/extract] batch gap resolve error:', error)
+      errors.push(`gap_resolve: ${error.message}`)
     }
   }
 

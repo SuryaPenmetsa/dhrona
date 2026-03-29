@@ -224,6 +224,32 @@ RLS is enabled on all four tables.
 | 6 | Connections are inserted with `child_key = 'curriculum'` and `wtr_upload_id` |
 | 7 | Upload row is updated to `completed` or `failed` |
 
+### 6.2.1 Batch curriculum import and reset
+
+**Implementation:** `scripts/import-curriculum.mjs`, `supabase/reset_knowledge_map.sql`
+
+To support full re-ingestion after prompt/modeling changes:
+
+1. `reset_knowledge_map.sql` clears graph tables in FK-safe order and reseeds IB key concepts.
+2. `import-curriculum.mjs` processes all WTR files (PDF + XLSX), chronologically.
+3. XLSX files are transformed into markdown text blocks for extraction.
+4. Upsert logic reuses canonical concepts and inserts curriculum edges with `wtr_upload_id`.
+
+This enables reproducible full refreshes of curriculum graph quality after extraction-rule updates.
+
+### 6.4 Flow D: WTR schedule extraction -> temporal map
+
+**Implementation:** `supabase/migrations/005_curriculum_schedule.sql`, `scripts/extract-schedule.mjs`
+
+| Step | What happens |
+|------|-------------|
+| 1 | `curriculum_schedule` stores concept-week records (`current` or `coming`) with date ranges |
+| 2 | Script parses WTR date ranges from filenames and normalizes to `YYYY-MM-DD` |
+| 3 | XLSX schedule text is parsed directly; PDF schedule is inferred from extracted curriculum edges |
+| 4 | Raw topic lines are matched to canonical concepts via exact/substring/word-overlap matching |
+| 5 | Rows are upserted on `(concept_name, subject, week_start, schedule_type)` |
+| 6 | Graph API can filter and sort by week timeline |
+
 ### 6.3 Flow C: graph retrieval -> tutoring context
 
 **Implementation:** `lib/graph/context.ts`
@@ -245,19 +271,45 @@ When preparing context for a tutoring session, the system retrieves:
 
 ### 7.1 Graph API
 
-`/api/admin/graph` reads concepts and connections from Supabase, applies filters (subject, grade, search, source), trims to 220 concepts / 320 connections, and returns stats. It synthesizes concept objects for edge endpoints missing from the `concepts` table.
+`/api/admin/graph` reads concepts, connections, and schedule metadata from Supabase and applies filters:
 
-### 7.2 Overview mode
+- `subject`
+- `grade`
+- `search`
+- `source` (`all`, `curriculum`, `student`)
+- `week_start` / `week_end`
 
-When no concept is selected. Uses indegree reduction to compute directed levels, groups concepts into subject lanes, and places cross-subject concepts in a shared lane. This is a guided explanatory layout, not a force-directed graph.
+When week filters are provided, both concepts and edges are constrained to the selected temporal slice. Schedule metadata (`week_start`, `week_end`, `schedule_type`) is attached to returned concepts.
 
-### 7.3 Focus mode
+It also synthesizes concept objects for edge endpoints missing from the `concepts` table.
 
-When a concept is selected. Mind-map layout with the selected concept center-left, prerequisites far left, immediate next ideas right, and second-order forward branches further right. Edge color distinguishes curriculum vs student provenance.
+### 7.2 Graph interaction mode
+
+The explorer now uses a high-density force-directed layout optimized for large concept sets. It supports:
+
+- pan + zoom
+- drag-to-reposition nodes
+- fit/reset viewport
+- branch highlighting from selected/focused node
+- optional always-on edge labels
+
+### 7.3 Relationship management
+
+Admins can edit and delete edges directly from the graph UI.
+
+**Implementation:** `app/api/admin/graph/connections/route.ts`
+
+- `PATCH` updates edge `relationship`
+- `DELETE` removes one or multiple edges (`id` or `ids`)
 
 ### 7.4 Concept browser
 
-Right-side panel with concept lookup, degree counts, selected concept details, and textual relationship listings.
+Right-side panel supports:
+
+- quick concept search
+- sort by degree or schedule date
+- per-node schedule hints
+- direct jump-to-node for relationship traversal
 
 ---
 
@@ -265,11 +317,30 @@ Right-side panel with concept lookup, degree counts, selected concept details, a
 
 ### 8.1 Session extraction prompt
 
-Asks Claude for meaningful concepts discussed, concept bridges, unresolved misunderstandings, and newly resolved gaps. Explicitly discourages noise.
+Prompts are now externalized to markdown files and loaded through `lib/graph/prompts.ts`.
+
+- `prompts/session-extraction.md`
+- `prompts/wtr-extraction.md`
+- `prompts/shared-rules.md`
+
+Session extraction combines:
+
+1. session-specific instructions
+2. shared canonical rules/taxonomy
+3. existing concepts block (for reuse)
+4. open gap block (for exact-name resolution)
 
 ### 8.2 WTR extraction prompt
 
-Asks Claude for atomic syllabus ideas, sequencing, prerequisite relationships, and justified cross-subject links. Emphasizes reuse of existing concept labels passed in the prompt.
+WTR extraction uses the same shared rule layer + WTR-specific instructions and includes existing concepts for canonicalization.
+
+The shared rules now explicitly define:
+
+- canonical subject names
+- controlled relationship taxonomy
+- concept naming granularity
+- edge direction semantics
+- IB key concept linking constraints
 
 ---
 
@@ -325,13 +396,11 @@ Both the session extraction and WTR extraction prompts now include an explicit i
 
 Migration `004_fix_null_subject_uniqueness.sql` replaces the original `unique(name, subject)` constraint with a `COALESCE`-based unique index that properly handles NULL subjects. It also deduplicates any existing rows.
 
-### 9.11 Relationship text is uncontrolled free text
+### 9.11 ~~Relationship text is uncontrolled free text~~ FIXED (prompt-level)
 
-**Severity: Low.**
+`prompts/shared-rules.md` now constrains extraction to a fixed relationship taxonomy and explicit edge-direction semantics. This materially reduces label drift across extractions.
 
-There is no taxonomy or normalization for relationship labels. Claude might produce `prerequisite for`, `is a prerequisite of`, `prerequisite`, `required before`, etc. These all create distinct edges with no way to query "show me all prerequisites."
-
-**Fix:** Define a controlled vocabulary of relationship types and map free text to canonical labels either in the prompt or in a post-processing step.
+Note: hard DB-level enum enforcement is still open; current control is prompt-governed.
 
 ### 9.12 No graph pruning or versioning
 
@@ -352,6 +421,10 @@ Repeated extractions can insert semantically duplicate edges. Over time this inf
 The `INSERT` and `UPDATE` policies only check `auth.role() = 'authenticated'`. Any authenticated user can insert connections for any `child_key` or update any gap's status. There is no check that the user is the child or parent referenced.
 
 This is fine while the app only runs as a controlled family tool, but would be a real security issue in a multi-family deployment.
+
+### 9.15 ~~Week filter leaked full graph through connection expansion~~ FIXED
+
+In `/api/admin/graph`, week filtering now constrains both concept visibility and connection inclusion. Previously, connection expansion could re-introduce off-week concepts and make the week filter look ineffective.
 
 ---
 
@@ -407,7 +480,7 @@ All four items have been implemented:
 
 | Item | What to do | Why |
 |------|-----------|-----|
-| Connect IB key concepts | Add prompt instruction to link topics to IB key concepts | Makes seeded concepts useful |
+| Enforce relationship taxonomy at DB layer | Add enum/check constraint for `relationship` values | Prevents taxonomy drift outside LLM path |
 | Normalize relationship types | Define controlled vocabulary, map free text in post-processing | Enables structured graph queries |
 | Add edge deduplication | Unique constraint on normalized edge signature, or observation counts | Prevents graph noise |
 | Add concept foreign keys to edges | `concept_a_id`, `concept_b_id` with optional name snapshots | Enables renames, integrity, better queries |
@@ -416,7 +489,7 @@ All four items have been implemented:
 
 | Item | What to do | Why |
 |------|-----------|-----|
-| Model curriculum time | Expose temporal navigation (this week, upcoming, prior term) | Enables syllabus-aware tutoring |
+| Model curriculum time | Extend schedule to multi-grade/multi-section and per-term views | Enables broader syllabus-aware tutoring |
 | Enrich mastery modeling | Confidence scores, date last reinforced, misconception categories | Supports spaced repetition |
 | Add canonicalization pipeline | Post-extraction fuzzy matching and synonym merging | Reduces long-term graph fragmentation |
 | Add confidence metadata | Extraction confidence, model version, human-reviewed flag | Supports quality filtering |
@@ -444,25 +517,76 @@ Or more compactly:
 |------|------|
 | `supabase/migrations/002_knowledge_graph.sql` | Core schema: concepts, connections, gaps |
 | `supabase/migrations/003_wtr_curriculum.sql` | WTR uploads, curriculum child_key, schema evolution |
+| `supabase/migrations/004_fix_null_subject_uniqueness.sql` | NULL-safe uniqueness handling for concepts |
+| `supabase/migrations/005_curriculum_schedule.sql` | Curriculum time model: concept-week schedule table |
+| `supabase/reset_knowledge_map.sql` | Full knowledge-map reset + IB key concept reseed |
 | `lib/graph/types.ts` | TypeScript types for all graph entities |
 | `lib/graph/extract.ts` | Session transcript -> Claude extraction -> Supabase save |
 | `lib/graph/wtr.ts` | WTR document -> Claude extraction -> Supabase save |
+| `lib/graph/prompts.ts` | Prompt loader/cache + prompt block formatters |
 | `lib/graph/context.ts` | Graph retrieval -> prompt context formatting |
 | `lib/graph/test-graph.ts` | Manual test script for extraction and context |
+| `prompts/shared-rules.md` | Canonical subjects, taxonomy, direction semantics, IB linking rules |
+| `prompts/session-extraction.md` | Session extraction instructions |
+| `prompts/wtr-extraction.md` | WTR extraction instructions |
 | `app/api/admin/graph/route.ts` | Graph API: filtered concept + connection retrieval |
+| `app/api/admin/graph/connections/route.ts` | Admin edge edit/delete API |
 | `app/api/admin/wtr/route.ts` | WTR upload list API |
 | `app/api/admin/wtr/process/route.ts` | WTR upload processing API |
 | `app/admin/graph/page.tsx` | Graph explorer UI: overview + focus mode + browser |
 | `app/admin/wtr/page.tsx` | WTR upload admin UI |
+| `scripts/import-curriculum.mjs` | Batch curriculum ingestion from all WTR files |
+| `scripts/extract-schedule.mjs` | Extract week-level schedule and populate `curriculum_schedule` |
 
 ---
 
 ## 14. Summary
 
-The knowledge map architecture is a hybrid memory system for tutoring that combines a shared concept graph, personalized student relationships, curriculum-derived relationships, and mastery tracking.
+The knowledge map architecture is now a hybrid educational memory system with five integrated layers:
 
-Its most important architectural insight is that student understanding and curriculum structure should live in the same conceptual space, but remain distinguishable by provenance.
+- shared concept vocabulary (`concepts`)
+- evidence-backed relationships (`concept_connections`)
+- student mastery state (`learning_gaps`)
+- ingestion provenance (`wtr_uploads`)
+- curriculum timeline (`curriculum_schedule`)
 
-Its most important current weakness is that the two extraction flows have different canonicalization behavior: WTR extraction receives existing concepts for reuse while session extraction does not, and gap resolution operates without knowledge of existing gaps.
+The key implementation evolution after the original design document is the shift from a static graph to a time-aware, admin-curatable graph:
 
-The system is a practical semantic graph built for educational memory. It is simple, flexible, and already useful. The prioritized roadmap above addresses the real design issues before they compound.
+- prompts are externalized and centrally governed
+- full reset/reimport workflows are automated
+- graph edges are editable/deletable from admin UI
+- schedule dates are extracted and attached to concepts
+- graph retrieval supports week-level filtering and timeline-driven sorting
+
+This keeps the architecture lightweight (Postgres + LLM extraction) while significantly improving data quality controls, temporal alignment, and operational maintainability.
+
+---
+
+## 15. Post-Document Implementation Updates (Consolidated)
+
+The following were implemented after the initial version of this architecture document:
+
+1. **Prompt modularization**
+   - Moved extraction instructions into versionable markdown files under `prompts/`.
+   - Added `lib/graph/prompts.ts` cache/loader and shared block formatters.
+
+2. **Canonical extraction quality improvements**
+   - Session + WTR prompts now share taxonomy and direction rules.
+   - Existing concepts and open gaps are injected into session extraction.
+
+3. **Graph operations in admin**
+   - Added edge relationship edit and edge delete APIs.
+   - Added UI controls for relationship CRUD and edge label visibility.
+
+4. **Curriculum timeline model**
+   - Added `curriculum_schedule` table and indexes.
+   - Built `scripts/extract-schedule.mjs` to parse WTR week windows and map topics to canonical concepts.
+   - Imported schedule rows for all available WTR files.
+
+5. **Temporal graph navigation**
+   - Added week filter + date-aware sorting in graph explorer.
+   - Updated graph API to return schedule metadata and week options.
+   - Fixed week-filter leakage so off-week concepts are no longer reintroduced via connection expansion.
+
+6. **Operational scripts**
+   - Added full reset script (`reset_knowledge_map.sql`) and batch import script (`scripts/import-curriculum.mjs`) for clean reprocessing cycles.
